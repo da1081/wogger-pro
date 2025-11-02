@@ -14,7 +14,8 @@ Have you ever reached that once-a-year productivity review and realized you forg
 
 ## Download
 
-Grab the latest Windows executable **[here]([https://example.com/wogger-pro.exe](https://github.com/da1081/wogger-pro/releases))**.
+Grab the latest Windows executable **[here](https://github.com/da1081/wogger-pro/releases)**.
+
 Run it, and you’re off.
 
 > **Heads-up:** the EXE is currently **unsigned**. Windows SmartScreen may ask if you trust the file. Choose **More info → Run anyway** if you obtained it from the official link and you trust the source.
@@ -308,4 +309,5 @@ Please keep code tidy and UI consistent with the current theme/style.
 ## License
 
 TBD. See `LICENSE` when it lands in the repository.
+
 
