@@ -27,11 +27,13 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.backup import create_appdata_backup
+from ..core.categories import CategoryManager
 from ..core.exceptions import BackupError, SettingsError
 from ..core.paths import default_app_data_dir, default_downloads_dir, recurring_backups_dir
 from ..core.prompt_manager import PromptManager
 from ..core.repository import EntriesRepository
 from ..core.settings import DEFAULT_PROMPT_CRON, Settings, Theme
+from .categories_dialog import CategoriesDialog
 from .csv_import_dialog import CsvImportDialog
 from .icons import app_icon, import_icon, sound_off_icon, sound_on_icon
 from .sound_player import SoundPlayer
@@ -57,6 +59,7 @@ class SettingsDialog(QDialog):
         self._result_settings: Settings | None = None
         self._repository = repository
         self._prompt_manager = prompt_manager
+        self._category_manager = CategoryManager()
         if sound_player is not None:
             self._sound_player = sound_player
         else:
@@ -201,6 +204,18 @@ class SettingsDialog(QDialog):
         import_layout.addStretch(1)
 
         layout.addRow("Legacy data", import_widget)
+
+        categories_widget = QWidget(self)
+        categories_layout = QHBoxLayout(categories_widget)
+        categories_layout.setContentsMargins(0, 0, 0, 0)
+        categories_layout.setSpacing(8)
+
+        self._categories_button = QPushButton("Manage Categories…", self)
+        self._categories_button.clicked.connect(self._on_categories_clicked)
+        categories_layout.addWidget(self._categories_button)
+        categories_layout.addStretch(1)
+
+        layout.addRow("Categories", categories_widget)
 
         self._error_label = QLabel("")
         self._error_label.setWordWrap(True)
@@ -362,6 +377,21 @@ class SettingsDialog(QDialog):
 
         if result == QDialog.DialogCode.Accepted:
             self._clear_error()
+
+    def _on_categories_clicked(self) -> None:
+        dialog = CategoriesDialog(
+            self._category_manager,
+            self._repository,
+            parent=self,
+            entries_updated=self._prompt_manager.notify_entries_replaced,
+        )
+        try:
+            dialog.exec()
+        except Exception as exc:  # pragma: no cover - Qt dialog errors are user specific
+            LOGGER.exception("Categories dialog failed")
+            QMessageBox.critical(self, "Unable to open categories", str(exc))
+            return
+        self._clear_error()
 
     @property
     def updated_settings(self) -> Settings:

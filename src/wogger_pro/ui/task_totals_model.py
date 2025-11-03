@@ -10,7 +10,7 @@ from ..core.models import TaskSummary
 
 
 class TaskTotalsModel(QAbstractTableModel):
-    HEADERS = ("Task", "Minutes", "Total")
+    HEADERS = ("Task", "Category", "Minutes", "Total")
 
     def __init__(self) -> None:
         super().__init__()
@@ -34,10 +34,14 @@ class TaskTotalsModel(QAbstractTableModel):
             if index.column() == 0:
                 return row.task
             if index.column() == 1:
-                return str(row.total_minutes)
+                return row.category or ""
             if index.column() == 2:
+                return str(row.total_minutes)
+            if index.column() == 3:
                 return row.pretty_total
-        if role == Qt.TextAlignmentRole and index.column() != 0:
+        if role == Qt.EditRole and index.column() == 1:
+            return row.category or ""
+        if role == Qt.TextAlignmentRole and index.column() not in (0, 1):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
@@ -47,6 +51,28 @@ class TaskTotalsModel(QAbstractTableModel):
         if orientation == Qt.Horizontal and 0 <= section < len(self.HEADERS):
             return self.HEADERS[section]
         return None
+
+    def flags(self, index: QModelIndex):  # type: ignore[override]
+        base = super().flags(index)
+        if not index.isValid():
+            return base
+        if index.column() == 1:
+            return base | Qt.ItemIsEditable
+        return base
+
+    def setData(self, index: QModelIndex, value, role: int = Qt.EditRole):  # type: ignore[override]
+        if role != Qt.EditRole or not index.isValid() or index.column() != 1:
+            return False
+        row = self.summary_for_row(index.row())
+        if row is None:
+            return False
+        new_value = (value or "").strip()
+        current = row.category or ""
+        if new_value == current:
+            return True
+        row.category = new_value or None
+        self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+        return True
 
     def update_rows(self, rows: List[TaskSummary]) -> None:
         self.beginResetModel()

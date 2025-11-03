@@ -23,15 +23,19 @@ class Entry:
     segment_end: datetime
     minutes: int
     entry_id: str = field(default_factory=_default_entry_id)
+    category: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "entry_id": self.entry_id,
             "task": self.task,
             "segment_start": self.segment_start.isoformat(timespec="seconds"),
             "segment_end": self.segment_end.isoformat(timespec="seconds"),
             "minutes": self.minutes,
         }
+        if self.category:
+            payload["category"] = self.category
+        return payload
 
     @classmethod
     def from_json_dict(cls, payload: dict[str, Any]) -> "Entry":
@@ -41,6 +45,7 @@ class Entry:
             segment_end=_parse_datetime(payload["segment_end"]),
             minutes=int(payload["minutes"]),
             entry_id=str(payload.get("entry_id") or _default_entry_id()),
+            category=(str(payload["category"]).strip() or None) if "category" in payload else None,
         )
 
     def as_range(self) -> TimeRange:
@@ -51,6 +56,7 @@ class Entry:
 class TaskSummary:
     task: str
     total_minutes: int
+    category: str | None = None
 
     @property
     def pretty_total(self) -> str:

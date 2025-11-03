@@ -23,6 +23,7 @@ from .ui.prompt_service import PromptService
 from .ui.sound_player import SoundPlayer
 from .ui.settings_dialog import SettingsDialog
 from .ui.theme_manager import ThemeManager
+from .ui.qt_message_handler import install_qt_message_handler
 
 LOGGER = logging.getLogger("wogger.app")
 
@@ -41,6 +42,7 @@ class ApplicationController:
         set_app_data_directory(Path(self._settings.app_data_path).expanduser())
         ensure_app_structure()
         configure_logging()
+        install_qt_message_handler()
         # Rebuild manager to ensure it points at the active app data directory
         self._settings_manager = SettingsManager()
 

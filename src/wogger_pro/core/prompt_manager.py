@@ -77,6 +77,9 @@ class PromptManager(QObject):
             self._last_task = new_task
         return updated
 
+    def set_task_category(self, task: str, category: str | None) -> int:
+        return self._repository.assign_category_to_task(task, category)
+
     def refresh_last_task(self) -> None:
         last_entry = self._repository.get_last_entry()
         self._last_task = last_entry.task if last_entry else None

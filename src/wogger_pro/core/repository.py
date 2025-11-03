@@ -35,8 +35,22 @@ class EntriesRepository:
 
     # ------------------------------------------------------------------
     # Public API
-    def add_entry(self, task: str, segment_start: datetime, segment_end: datetime, minutes: int) -> Entry:
-        entry = Entry(task=task, segment_start=segment_start, segment_end=segment_end, minutes=minutes)
+    def add_entry(
+        self,
+        task: str,
+        segment_start: datetime,
+        segment_end: datetime,
+        minutes: int,
+        category: str | None = None,
+    ) -> Entry:
+        normalized_category = category.strip() if isinstance(category, str) and category.strip() else None
+        entry = Entry(
+            task=task,
+            segment_start=segment_start,
+            segment_end=segment_end,
+            minutes=minutes,
+            category=normalized_category,
+        )
         self._logger.info(
             "Adding entry",
             extra={
@@ -46,6 +60,7 @@ class EntriesRepository:
                 "segment_end": segment_end.isoformat(),
                 "minutes": minutes,
                 "entry_id": entry.entry_id,
+                "category": normalized_category or "",
             },
         )
         persisted = self.add_entries_batch([entry])
@@ -147,6 +162,16 @@ class EntriesRepository:
         )
         return ordered
 
+    def list_categories_with_counts(self) -> list[tuple[str, int]]:
+        entries = self.get_all_entries()
+        counts = Counter(entry.category for entry in entries if entry.category)
+        ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+        self._logger.debug(
+            "Category counts computed",
+            extra={"event": "entries_category_counts", "category_count": len(ordered)},
+        )
+        return ordered
+
     def get_last_entry(self) -> Optional[Entry]:
         entries = self.get_all_entries()
         if not entries:
@@ -207,6 +232,176 @@ class EntriesRepository:
                 extra={"event": "entries_task_rename_failed", "from": old_task, "to": new_task},
             )
             raise PersistenceError("Unable to rename task entries") from exc
+
+        return updated
+
+    def rename_category(self, old_category: str, new_category: str) -> int:
+        source = old_category.strip()
+        target = new_category.strip()
+        if not source or not target:
+            raise ValueError("Category names must be non-empty")
+        if source.lower() == target.lower():
+            return 0
+
+        self._logger.info(
+            "Renaming category",
+            extra={
+                "event": "entries_category_rename",
+                "from": source,
+                "to": target,
+            },
+        )
+
+        try:
+            with portalocker.Lock(
+                self._path,
+                mode="r+",
+                timeout=self._lock_timeout,
+                flags=portalocker.LockFlags.EXCLUSIVE,
+                encoding="utf-8",
+            ) as locked_file:
+                locked_file.seek(0)
+                lines = [line.rstrip("\n") for line in locked_file if line.strip()]
+                entries = self._deserialize_entries(lines)
+
+                updated = 0
+                for entry in entries:
+                    if entry.category and entry.category.strip().lower() == source.lower():
+                        entry.category = target
+                        updated += 1
+
+                if updated == 0:
+                    return 0
+
+                locked_file.seek(0)
+                locked_file.truncate()
+                for entry in entries:
+                    serialized = json.dumps(entry.to_json_dict(), separators=(",", ":"))
+                    locked_file.write(serialized)
+                    locked_file.write("\n")
+                locked_file.flush()
+                os.fsync(locked_file.fileno())
+        except Exception as exc:
+            self._logger.exception(
+                "Failed to rename category",
+                extra={"event": "entries_category_rename_failed", "from": source, "to": target},
+            )
+            raise PersistenceError("Unable to rename category") from exc
+
+        return updated
+
+    def clear_category(self, category: str) -> int:
+        target = category.strip()
+        if not target:
+            return 0
+
+        self._logger.info(
+            "Clearing category from entries",
+            extra={"event": "entries_category_clear", "category": target},
+        )
+
+        try:
+            with portalocker.Lock(
+                self._path,
+                mode="r+",
+                timeout=self._lock_timeout,
+                flags=portalocker.LockFlags.EXCLUSIVE,
+                encoding="utf-8",
+            ) as locked_file:
+                locked_file.seek(0)
+                lines = [line.rstrip("\n") for line in locked_file if line.strip()]
+                entries = self._deserialize_entries(lines)
+
+                updated = 0
+                for entry in entries:
+                    if entry.category and entry.category.strip().lower() == target.lower():
+                        entry.category = None
+                        updated += 1
+
+                if updated == 0:
+                    return 0
+
+                locked_file.seek(0)
+                locked_file.truncate()
+                for entry in entries:
+                    serialized = json.dumps(entry.to_json_dict(), separators=(",", ":"))
+                    locked_file.write(serialized)
+                    locked_file.write("\n")
+                locked_file.flush()
+                os.fsync(locked_file.fileno())
+        except Exception as exc:
+            self._logger.exception(
+                "Failed to clear category",
+                extra={"event": "entries_category_clear_failed", "category": target},
+            )
+            raise PersistenceError("Unable to clear category") from exc
+
+        return updated
+
+    def assign_category_to_task(self, task: str, category: str | None) -> int:
+        normalized_task = task.strip()
+        if not normalized_task:
+            raise ValueError("Task name must be non-empty")
+        normalized_category = category.strip() if isinstance(category, str) else None
+        if normalized_category == "":
+            normalized_category = None
+
+        self._logger.info(
+            "Assigning category to task",
+            extra={
+                "event": "entries_task_category_assign",
+                "task": normalized_task,
+                "category": normalized_category or "",
+            },
+        )
+
+        try:
+            with portalocker.Lock(
+                self._path,
+                mode="r+",
+                timeout=self._lock_timeout,
+                flags=portalocker.LockFlags.EXCLUSIVE,
+                encoding="utf-8",
+            ) as locked_file:
+                locked_file.seek(0)
+                lines = [line.rstrip("\n") for line in locked_file if line.strip()]
+                entries = self._deserialize_entries(lines)
+
+                updated = 0
+                for entry in entries:
+                    if entry.task != normalized_task:
+                        continue
+                    current = (entry.category or "").strip()
+                    if normalized_category is None:
+                        if current:
+                            entry.category = None
+                            updated += 1
+                    else:
+                        if current.lower() != normalized_category.lower():
+                            entry.category = normalized_category
+                            updated += 1
+
+                if updated == 0:
+                    return 0
+
+                locked_file.seek(0)
+                locked_file.truncate()
+                for entry in entries:
+                    serialized = json.dumps(entry.to_json_dict(), separators=(",", ":"))
+                    locked_file.write(serialized)
+                    locked_file.write("\n")
+                locked_file.flush()
+                os.fsync(locked_file.fileno())
+        except Exception as exc:
+            self._logger.exception(
+                "Failed to assign category to task",
+                extra={
+                    "event": "entries_task_category_assign_failed",
+                    "task": normalized_task,
+                    "category": normalized_category or "",
+                },
+            )
+            raise PersistenceError("Unable to assign category to task") from exc
 
         return updated
 

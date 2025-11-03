@@ -6,9 +6,9 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Optional
+from typing import Optional, Callable, Sequence
 
-from PySide6.QtCore import Qt, Signal, QSize, QTimer
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QModelIndex
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -21,11 +21,13 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTableView,
     QDialog,
+    QStyledItemDelegate,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
+from ..core.categories import CategoryManager
 from ..core.exceptions import PersistenceError
 from ..core.models import Entry, TaskSummary
 from ..core.prompt_manager import PromptManager
@@ -39,6 +41,7 @@ from .icons import (
     remove_palette_listener,
     settings_icon,
 )
+from .category_picker import CategoryTreePicker
 from .prompt_service import PromptService
 from .task_totals_model import TaskTotalsModel
 from .task_edit_dialog import TaskEditDialog
@@ -57,6 +60,48 @@ class FilterState:
     mode: FilterMode
     start: Optional[datetime] = None
     end: Optional[datetime] = None
+
+
+class CategoryDelegate(QStyledItemDelegate):
+    def __init__(
+        self,
+        category_provider: Callable[[], Sequence[str]],
+        apply_callback: Callable[[QModelIndex, str | None, str | None], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._category_provider = category_provider
+        self._apply_callback = apply_callback
+
+    def createEditor(self, parent: QWidget, option, index):  # type: ignore[override]
+        editor = CategoryTreePicker(parent=parent, auto_popup=True)
+        editor.category_changed.connect(lambda _value: self._commit_editor(editor))
+        editor.setFocus(Qt.FocusReason.PopupFocusReason)
+        return editor
+
+    def setEditorData(self, editor: QWidget, index: QModelIndex) -> None:  # type: ignore[override]
+        if not isinstance(editor, CategoryTreePicker):
+            return
+        categories = list(self._category_provider())
+        editor.set_categories(categories)
+        current = index.data(Qt.EditRole)
+        editor.set_current_category((current or "").strip() or None)
+
+    def setModelData(self, editor: QWidget, model, index: QModelIndex) -> None:  # type: ignore[override]
+        if not isinstance(editor, CategoryTreePicker):
+            return
+        new_category = editor.current_category()
+        previous = index.data(Qt.EditRole)
+        previous_category = (previous or "").strip() or None
+        self._apply_callback(index, new_category, previous_category)
+        model.setData(index, new_category or "", Qt.EditRole)
+
+    def _commit_editor(self, editor: CategoryTreePicker) -> None:
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor, QStyledItemDelegate.NoHint)
+
+    def updateEditorGeometry(self, editor: QWidget, option, index) -> None:  # type: ignore[override]
+        editor.setGeometry(option.rect)
 
 
 class MainWindow(QMainWindow):
@@ -82,6 +127,8 @@ class MainWindow(QMainWindow):
         self._prompt_service = prompt_service  # keep reference
         self._filter_state = FilterState(FilterMode.TODAY)
 
+        self._category_manager = CategoryManager()
+
         self._model = TaskTotalsModel()
 
         self._build_ui()
@@ -106,15 +153,26 @@ class MainWindow(QMainWindow):
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setAlternatingRowColors(True)
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
         vheader = self._table.verticalHeader()
         vheader.setFixedWidth(12)
         header = self._table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self._table.doubleClicked.connect(self._on_row_double_clicked)
+        self._category_delegate = CategoryDelegate(
+            category_provider=self._category_manager.list_categories,
+            apply_callback=self._handle_category_commit,
+            parent=self._table,
+        )
+        self._table.setItemDelegateForColumn(1, self._category_delegate)
         layout.addWidget(self._table, 1)
 
         self.setCentralWidget(central)
@@ -222,7 +280,9 @@ class MainWindow(QMainWindow):
         self.manual_entry_requested.emit()
         self._prompt_service.show_manual_entry_dialog(self)
 
-    def _refresh_totals(self) -> None:
+    def _refresh_totals(self, preserve_task: str | None = None) -> None:
+        if preserve_task is None:
+            preserve_task = self._current_selected_task()
         entries: list[Entry]
         if self._filter_state.mode == FilterMode.TODAY:
             start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -241,12 +301,27 @@ class MainWindow(QMainWindow):
         self._update_summary_totals(summaries)
         self._update_status_bar()
         self._log_filter_change(len(entries))
+        self._select_task(preserve_task)
 
     def _build_summaries(self, entries: list[Entry]) -> list[TaskSummary]:
         totals: dict[str, int] = {}
+        category_counts: dict[str, dict[str, int]] = {}
         for entry in entries:
             totals[entry.task] = totals.get(entry.task, 0) + entry.minutes
-        summaries = [TaskSummary(task=name, total_minutes=minutes) for name, minutes in totals.items()]
+            category = (entry.category or "").strip()
+            if category:
+                bucket = category_counts.setdefault(entry.task, {})
+                bucket[category] = bucket.get(category, 0) + 1
+        summaries: list[TaskSummary] = []
+        for task_name, total_minutes in totals.items():
+            category = None
+            counts = category_counts.get(task_name)
+            if counts:
+                category = sorted(
+                    counts.items(),
+                    key=lambda item: (-item[1], item[0].lower(), item[0]),
+                )[0][0]
+            summaries.append(TaskSummary(task=task_name, total_minutes=total_minutes, category=category))
         summaries.sort(key=lambda summary: (-summary.total_minutes, summary.task.lower()))
         return summaries
 
@@ -307,6 +382,8 @@ class MainWindow(QMainWindow):
     def _on_row_double_clicked(self, index) -> None:
         if not index.isValid():
             return
+        if index.column() == 1:
+            return
         summary = self._model.summary_for_row(index.row())
         if summary is None:
             return
@@ -335,3 +412,56 @@ class MainWindow(QMainWindow):
         status = self.statusBar()
         status.showMessage(f"Renamed '{summary.task}' to '{new_name}' ({updated} entries)", 5000)
         QTimer.singleShot(5100, self._update_status_bar)
+
+    def _handle_category_commit(
+        self,
+        index: QModelIndex,
+        new_category: str | None,
+        previous_category: str | None,
+    ) -> None:
+        summary = self._model.summary_for_row(index.row())
+        if summary is None:
+            return
+
+        previous_key = (previous_category or "").lower()
+        new_key = (new_category or "").lower() if new_category else ""
+        if previous_key == new_key:
+            return
+
+        try:
+            updated = self._prompt_manager.set_task_category(summary.task, new_category)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Unable to update category", str(exc))
+            self._refresh_totals(preserve_task=summary.task)
+            return
+        except PersistenceError as exc:
+            QMessageBox.critical(self, "Unable to update category", str(exc))
+            self._refresh_totals(preserve_task=summary.task)
+            return
+
+        if updated <= 0:
+            self.statusBar().showMessage("No category changes applied.", 4000)
+        else:
+            suffix = "entry" if updated == 1 else "entries"
+            self.statusBar().showMessage(f"Updated category for {updated} {suffix}.", 5000)
+        self._refresh_totals(preserve_task=summary.task)
+
+    def _current_selected_task(self) -> str | None:
+        selection_model = self._table.selectionModel()
+        if selection_model is None:
+            return None
+        selected_rows = selection_model.selectedRows()
+        if not selected_rows:
+            return None
+        summary = self._model.summary_for_row(selected_rows[0].row())
+        return summary.task if summary else None
+
+    def _select_task(self, task_name: str | None) -> None:
+        if not task_name:
+            return
+        for row in range(self._model.rowCount()):
+            summary = self._model.summary_for_row(row)
+            if summary and summary.task == task_name:
+                self._table.selectRow(row)
+                self._table.scrollTo(self._model.index(row, 0), QAbstractItemView.PositionAtCenter)
+                break
