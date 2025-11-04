@@ -5,11 +5,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QSize, QUrl  # type: ignore[import]
+from PySide6.QtCore import QSize, QUrl, Qt  # type: ignore[import]
 from PySide6.QtGui import QDesktopServices  # type: ignore[import]
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -22,8 +21,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+    QAbstractSpinBox,
 )
 
 from ..core.backup import create_appdata_backup
@@ -35,7 +36,18 @@ from ..core.repository import EntriesRepository
 from ..core.settings import DEFAULT_PROMPT_CRON, Settings, Theme
 from .categories_dialog import CategoriesDialog
 from .csv_import_dialog import CsvImportDialog
-from .icons import app_icon, import_icon, sound_off_icon, sound_on_icon
+from .icons import (
+    add_palette_listener,
+    app_icon,
+    backup_off_icon,
+    backup_on_icon,
+    import_icon,
+    minus_icon,
+    plus_icon,
+    remove_palette_listener,
+    sound_off_icon,
+    sound_on_icon,
+)
 from .sound_player import SoundPlayer
 
 LOGGER = logging.getLogger("wogger.ui.settings")
@@ -60,6 +72,8 @@ class SettingsDialog(QDialog):
         self._repository = repository
         self._prompt_manager = prompt_manager
         self._category_manager = CategoryManager()
+        self._spin_buttons: dict[QSpinBox, tuple[QToolButton, QToolButton]] = {}
+        add_palette_listener(self._refresh_spin_icons)
         if sound_player is not None:
             self._sound_player = sound_player
         else:
@@ -77,6 +91,14 @@ class SettingsDialog(QDialog):
 
         layout.addRow("Theme", self._theme_combo)
         layout.addRow("Prompt schedule (cron)", self._cron_edit)
+
+        self._missing_slot_spin = QSpinBox()
+        self._missing_slot_spin.setRange(0, 2_147_483_647)
+        self._missing_slot_spin.setSuffix(" min")
+        self._missing_slot_spin.setToolTip(
+            "Treat gaps shorter than this duration as missed timeslots (0 disables detection)"
+        )
+        layout.addRow("Missing timeslot window", self._create_spin_control(self._missing_slot_spin, step=10))
 
         self._sound_toggle_button = QPushButton(self)
         self._sound_toggle_button.setCheckable(True)
@@ -140,9 +162,12 @@ class SettingsDialog(QDialog):
         recurring_layout.setContentsMargins(0, 0, 0, 0)
         recurring_layout.setSpacing(6)
 
-        self._recurring_enabled_checkbox = QCheckBox("Enable recurring automatic backups", self)
-        self._recurring_enabled_checkbox.setChecked(True)
-        recurring_layout.addWidget(self._recurring_enabled_checkbox)
+        self._recurring_toggle_button = QPushButton(self)
+        self._recurring_toggle_button.setCheckable(True)
+        self._recurring_toggle_button.setMinimumWidth(220)
+        self._recurring_toggle_button.setIconSize(QSize(20, 20))
+        self._recurring_toggle_button.toggled.connect(self._on_recurring_enabled_toggled)
+        recurring_layout.addWidget(self._recurring_toggle_button)
 
         interval_row = QWidget(recurring_widget)
         interval_layout = QHBoxLayout(interval_row)
@@ -150,10 +175,10 @@ class SettingsDialog(QDialog):
         interval_layout.setSpacing(8)
 
         interval_layout.addWidget(QLabel("Create backup every", interval_row))
-        self._recurring_interval_spin = QSpinBox(interval_row)
+        self._recurring_interval_spin = QSpinBox()
         self._recurring_interval_spin.setRange(1, 365)
         self._recurring_interval_spin.setValue(1)
-        interval_layout.addWidget(self._recurring_interval_spin)
+        interval_layout.addWidget(self._create_spin_control(self._recurring_interval_spin, step=1))
         interval_layout.addWidget(QLabel("day(s)", interval_row))
         interval_layout.addStretch(1)
         recurring_layout.addWidget(interval_row)
@@ -164,10 +189,10 @@ class SettingsDialog(QDialog):
         retention_layout.setSpacing(8)
 
         retention_layout.addWidget(QLabel("Keep backups for", retention_row))
-        self._recurring_retention_spin = QSpinBox(retention_row)
+        self._recurring_retention_spin = QSpinBox()
         self._recurring_retention_spin.setRange(1, 100)
         self._recurring_retention_spin.setValue(7)
-        retention_layout.addWidget(self._recurring_retention_spin)
+        retention_layout.addWidget(self._create_spin_control(self._recurring_retention_spin, step=1))
         retention_layout.addWidget(QLabel("day(s)", retention_row))
         retention_layout.addStretch(1)
         recurring_layout.addWidget(retention_row)
@@ -203,7 +228,7 @@ class SettingsDialog(QDialog):
         import_layout.addWidget(self._import_button)
         import_layout.addStretch(1)
 
-        layout.addRow("Legacy data", import_widget)
+        layout.addRow("Legacy Wogger import", import_widget)
 
         categories_widget = QWidget(self)
         categories_layout = QHBoxLayout(categories_widget)
@@ -245,10 +270,10 @@ class SettingsDialog(QDialog):
         self._sound_toggle_button.toggled.connect(lambda _checked: self._clear_error())
         self._app_data_edit.textChanged.connect(self._clear_error)
         self._backup_path_edit.textChanged.connect(self._clear_error)
-        self._recurring_enabled_checkbox.toggled.connect(self._on_recurring_enabled_toggled)
         self._recurring_interval_spin.valueChanged.connect(lambda _value: self._clear_error())
         self._recurring_retention_spin.valueChanged.connect(lambda _value: self._clear_error())
         self._recurring_path_edit.textChanged.connect(self._clear_error)
+        self._missing_slot_spin.valueChanged.connect(lambda _value: self._clear_error())
 
         self._update_recurring_controls_enabled()
 
@@ -258,7 +283,7 @@ class SettingsDialog(QDialog):
         theme_value = self._theme_combo.currentData()
         cron_value = self._cron_edit.text().strip()
         try:
-            recurring_enabled = self._recurring_enabled_checkbox.isChecked()
+            recurring_enabled = self._recurring_toggle_button.isChecked()
             recurring_interval = self._recurring_interval_spin.value()
             recurring_retention = self._recurring_retention_spin.value()
             recurring_path = self._recurring_path_edit.text().strip() or str(recurring_backups_dir())
@@ -273,6 +298,7 @@ class SettingsDialog(QDialog):
                 recurring_backup_interval_days=recurring_interval,
                 recurring_backup_retention_days=recurring_retention,
                 recurring_backup_path=recurring_path,
+                missing_timeslot_threshold_minutes=self._missing_slot_spin.value(),
             )
         except SettingsError as exc:
             LOGGER.warning("Settings validation failed: %s", exc)
@@ -315,12 +341,14 @@ class SettingsDialog(QDialog):
             self._backup_button.setText(original_text)
             self._backup_button.setEnabled(True)
 
-    def _on_recurring_enabled_toggled(self, _checked: bool) -> None:
-        self._update_recurring_controls_enabled()
+    def _on_recurring_enabled_toggled(self, checked: bool) -> None:
+        self._update_recurring_controls_enabled(checked)
         self._clear_error()
 
-    def _update_recurring_controls_enabled(self) -> None:
-        enabled = self._recurring_enabled_checkbox.isChecked()
+    def _update_recurring_controls_enabled(self, checked: bool | None = None) -> None:
+        if checked is None:
+            checked = self._recurring_toggle_button.isChecked()
+        enabled = bool(checked)
         targets = (
             self._recurring_interval_spin,
             self._recurring_retention_spin,
@@ -329,6 +357,26 @@ class SettingsDialog(QDialog):
         )
         for widget in targets:
             widget.setEnabled(enabled)
+        for spin in (self._recurring_interval_spin, self._recurring_retention_spin):
+            buttons = self._spin_buttons.get(spin)
+            if buttons:
+                for button in buttons:
+                    button.setEnabled(enabled)
+        self._update_recurring_button(checked)
+
+    def _update_recurring_button(self, checked: bool | None = None) -> None:
+        if checked is None:
+            checked = self._recurring_toggle_button.isChecked()
+        if checked:
+            self._recurring_toggle_button.setText("Recurring backups enabled")
+            self._recurring_toggle_button.setIcon(backup_on_icon())
+            self._recurring_toggle_button.setToolTip("Click to disable recurring backups")
+            self._recurring_toggle_button.setStyleSheet("background-color: #2563eb; color: #ffffff;")
+        else:
+            self._recurring_toggle_button.setText("Recurring backups disabled")
+            self._recurring_toggle_button.setIcon(backup_off_icon())
+            self._recurring_toggle_button.setToolTip("Click to enable recurring backups")
+            self._recurring_toggle_button.setStyleSheet("background-color: #4b5563; color: #f9fafb;")
 
     def _on_sound_button_toggled(self, checked: bool) -> None:
         self._sound_player.set_enabled(checked)
@@ -397,6 +445,10 @@ class SettingsDialog(QDialog):
     def updated_settings(self) -> Settings:
         return self._result_settings or self._initial_settings
 
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        remove_palette_listener(self._refresh_spin_icons)
+        super().closeEvent(event)
+
     # ------------------------------------------------------------------
     def _apply_settings_to_fields(self, settings: Settings) -> None:
         index = self._theme_combo.findData(settings.theme.value)
@@ -412,13 +464,85 @@ class SettingsDialog(QDialog):
         self._update_sound_button()
         self._app_data_edit.setText(settings.app_data_path)
         self._backup_path_edit.setText(settings.backup_path)
-        self._recurring_enabled_checkbox.setChecked(settings.recurring_backup_enabled)
+        self._recurring_toggle_button.blockSignals(True)
+        self._recurring_toggle_button.setChecked(settings.recurring_backup_enabled)
+        self._recurring_toggle_button.blockSignals(False)
         interval_value = max(1, settings.recurring_backup_interval_days)
         self._recurring_interval_spin.setValue(interval_value)
         retention_value = min(100, max(1, settings.recurring_backup_retention_days))
         self._recurring_retention_spin.setValue(retention_value)
         self._recurring_path_edit.setText(settings.recurring_backup_path)
-        self._update_recurring_controls_enabled()
+        self._update_recurring_controls_enabled(settings.recurring_backup_enabled)
+        clamped_missing = max(
+            self._missing_slot_spin.minimum(),
+            min(self._missing_slot_spin.maximum(), settings.missing_timeslot_threshold_minutes),
+        )
+        self._missing_slot_spin.setValue(clamped_missing)
+
+    def _create_spin_control(self, spin: QSpinBox, *, step: int) -> QWidget:
+        container = QWidget(self)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        minus_button = QToolButton(container)
+        minus_button.setAutoRaise(True)
+        minus_button.setCursor(Qt.PointingHandCursor)
+        minus_button.setIconSize(QSize(18, 18))
+        minus_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        minus_button.setAutoRepeat(True)
+        minus_button.setAutoRepeatInterval(150)
+        minus_button.clicked.connect(lambda _checked=False, box=spin: self._adjust_spin(box, -1))
+
+        plus_button = QToolButton(container)
+        plus_button.setAutoRaise(True)
+        plus_button.setCursor(Qt.PointingHandCursor)
+        plus_button.setIconSize(QSize(18, 18))
+        plus_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        plus_button.setAutoRepeat(True)
+        plus_button.setAutoRepeatInterval(150)
+        plus_button.clicked.connect(lambda _checked=False, box=spin: self._adjust_spin(box, 1))
+
+        spin.setParent(container)
+        spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        spin.setSingleStep(step)
+        spin.setAccelerated(True)
+        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        spin.setMinimumWidth(80)
+
+        layout.addWidget(minus_button)
+        layout.addWidget(spin, 1)
+        layout.addWidget(plus_button)
+
+        self._spin_buttons[spin] = (minus_button, plus_button)
+        self._refresh_spin_icons()
+        return container
+
+    def _adjust_spin(self, spin: QSpinBox, steps: int) -> None:
+        if not spin.isEnabled():
+            return
+        delta = spin.singleStep() * steps
+        new_value = spin.value() + delta
+        bounded = max(spin.minimum(), min(spin.maximum(), new_value))
+        spin.setValue(bounded)
+
+    def _set_spin_button_tooltips(
+        self,
+        spin: QSpinBox,
+        minus_button: QToolButton,
+        plus_button: QToolButton,
+    ) -> None:
+        amount = spin.singleStep()
+        suffix = spin.suffix().strip()
+        suffix_text = f" {suffix}" if suffix else ""
+        minus_button.setToolTip(f"Decrease by {amount}{suffix_text}")
+        plus_button.setToolTip(f"Increase by {amount}{suffix_text}")
+
+    def _refresh_spin_icons(self) -> None:
+        for spin, (minus_button, plus_button) in self._spin_buttons.items():
+            minus_button.setIcon(minus_icon(18))
+            plus_button.setIcon(plus_icon(18))
+            self._set_spin_button_tooltips(spin, minus_button, plus_button)
 
     def _clear_error(self) -> None:
         self._error_label.clear()
@@ -458,6 +582,7 @@ class SettingsDialog(QDialog):
             recurring_backup_interval_days=1,
             recurring_backup_retention_days=7,
             recurring_backup_path=str(recurring_backups_dir()),
+            missing_timeslot_threshold_minutes=240,
         )
         self._apply_settings_to_fields(defaults)
         self._result_settings = defaults

@@ -12,11 +12,13 @@ from PySide6.QtCore import Qt, Signal, QSize, QTimer, QModelIndex
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QFrame,
     QHeaderView,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSizePolicy,
     QStatusBar,
     QTableView,
@@ -30,8 +32,10 @@ from PySide6.QtWidgets import (
 from ..core.categories import CategoryManager
 from ..core.exceptions import PersistenceError
 from ..core.models import Entry, TaskSummary
+from ..core.missing_timeslots import MissingTimeslot, MissingTimeslotStore, detect_missing_timeslots
 from ..core.prompt_manager import PromptManager
 from ..core.repository import EntriesRepository
+from ..core.settings import Settings
 from .date_range_dialog import DateRangeDialog
 from .icons import (
     add_palette_listener,
@@ -113,6 +117,7 @@ class MainWindow(QMainWindow):
         repository: EntriesRepository,
         prompt_manager: PromptManager,
         prompt_service: PromptService,
+        settings: Settings,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -126,6 +131,14 @@ class MainWindow(QMainWindow):
         self._prompt_manager = prompt_manager
         self._prompt_service = prompt_service  # keep reference
         self._filter_state = FilterState(FilterMode.TODAY)
+        self._settings = settings
+
+        self._missing_store = MissingTimeslotStore()
+        self._missing_panel: QWidget | None = None
+        self._missing_rows_layout: QVBoxLayout | None = None
+        self._missing_count_label: QLabel | None = None
+        self._active_missing_timeslots: list[MissingTimeslot] = []
+        self._latest_entries: list[Entry] = []
 
         self._category_manager = CategoryManager()
 
@@ -174,6 +187,8 @@ class MainWindow(QMainWindow):
         )
         self._table.setItemDelegateForColumn(1, self._category_delegate)
         layout.addWidget(self._table, 1)
+        missing_panel = self._build_missing_panel()
+        layout.addWidget(missing_panel)
 
         self.setCentralWidget(central)
 
@@ -244,6 +259,46 @@ class MainWindow(QMainWindow):
         layout.addLayout(right_layout)
         return container
 
+    def _build_missing_panel(self) -> QWidget:
+        panel = QFrame(self)
+        panel.setFrameShape(QFrame.StyledPanel)
+        panel.setObjectName("missingTimeslotsPanel")
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(6)
+
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(6)
+
+        title = QLabel("Short gaps detected", panel)
+        header_layout.addWidget(title)
+
+        header_layout.addStretch(1)
+        self._missing_count_label = QLabel("", panel)
+        self._missing_count_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        header_layout.addWidget(self._missing_count_label)
+        layout.addLayout(header_layout)
+
+        description = QLabel(
+            "Log a task for each gap or dismiss it if the break was intentional.",
+            panel,
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        container = QWidget(panel)
+        rows_layout = QVBoxLayout(container)
+        rows_layout.setContentsMargins(0, 0, 0, 0)
+        rows_layout.setSpacing(6)
+        self._missing_rows_layout = rows_layout
+        layout.addWidget(container)
+
+        panel.setVisible(False)
+        self._missing_panel = panel
+        return panel
+
     def _connect_signals(self) -> None:
         self._button_group.idToggled.connect(self._on_filter_toggled)
         self._calendar_button.clicked.connect(self._open_range_dialog)
@@ -283,7 +338,7 @@ class MainWindow(QMainWindow):
     def _refresh_totals(self, preserve_task: str | None = None) -> None:
         if preserve_task is None:
             preserve_task = self._current_selected_task()
-        entries: list[Entry]
+        entries: list[Entry] = []
         if self._filter_state.mode == FilterMode.TODAY:
             start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
             end = start + timedelta(days=1) - timedelta(seconds=1)
@@ -293,8 +348,14 @@ class MainWindow(QMainWindow):
         else:
             if not self._filter_state.start or not self._filter_state.end:
                 QMessageBox.warning(self, "Invalid range", "Please select a valid start and end time.")
+                self._latest_entries = []
+                self._update_missing_timeslots([])
                 return
             entries = self._repository.get_entries_by_range(self._filter_state.start, self._filter_state.end)
+
+        entries = list(entries)
+        self._latest_entries = entries
+        self._update_missing_timeslots(entries)
 
         summaries = self._build_summaries(entries)
         self._model.update_rows(summaries)
@@ -325,9 +386,152 @@ class MainWindow(QMainWindow):
         summaries.sort(key=lambda summary: (-summary.total_minutes, summary.task.lower()))
         return summaries
 
+    def _update_missing_timeslots(self, entries: list[Entry]) -> None:
+        if self._missing_panel is None or self._missing_rows_layout is None:
+            return
+
+        threshold = self._settings.missing_timeslot_threshold_minutes
+        if threshold <= 0:
+            self._clear_missing_rows()
+            self._missing_panel.setVisible(False)
+            self._active_missing_timeslots = []
+            if self._missing_count_label is not None:
+                self._missing_count_label.setText("")
+            return
+
+        ignored = self._missing_store.ignored_keys()
+        gaps = detect_missing_timeslots(entries, threshold, ignored)
+        self._active_missing_timeslots = gaps
+
+        self._clear_missing_rows()
+        if not gaps:
+            if self._missing_count_label is not None:
+                self._missing_count_label.setText("")
+            self._missing_panel.setVisible(False)
+            return
+
+        for gap in gaps:
+            row = self._build_missing_row(gap)
+            self._missing_rows_layout.addWidget(row)
+
+        if self._missing_count_label is not None:
+            suffix = "gap" if len(gaps) == 1 else "gaps"
+            self._missing_count_label.setText(f"{len(gaps)} {suffix} ≤ {threshold} min")
+        self._missing_panel.setVisible(True)
+
+    def _clear_missing_rows(self) -> None:
+        if self._missing_rows_layout is None:
+            return
+        while self._missing_rows_layout.count():
+            item = self._missing_rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _build_missing_row(self, timeslot: MissingTimeslot) -> QWidget:
+        parent = self._missing_panel or self
+        row = QWidget(parent)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        same_day = timeslot.start.date() == timeslot.end.date()
+        if same_day:
+            day = timeslot.start.strftime("%Y-%m-%d")
+            range_label = f"{timeslot.start.strftime('%H:%M')} – {timeslot.end.strftime('%H:%M')}"
+            text = f"{day} • {range_label} ({timeslot.minutes} min gap)"
+        else:
+            text = (
+                f"{timeslot.start.strftime('%Y-%m-%d %H:%M')} → "
+                f"{timeslot.end.strftime('%Y-%m-%d %H:%M')} ({timeslot.minutes} min gap)"
+            )
+
+        label = QLabel(text, row)
+        label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(label, 1)
+
+        fix_button = QPushButton("Fix", row)
+        fix_button.clicked.connect(
+            lambda _checked=False, slot=timeslot: self._handle_fix_missing(slot)
+        )
+        layout.addWidget(fix_button)
+
+        dismiss_button = QPushButton("Dismiss", row)
+        dismiss_button.clicked.connect(
+            lambda _checked=False, slot=timeslot: self._handle_dismiss_missing(slot)
+        )
+        layout.addWidget(dismiss_button)
+
+        return row
+
+    def _handle_fix_missing(self, timeslot: MissingTimeslot) -> None:
+        try:
+            self._prompt_service.prompt_missing_timeslot(timeslot, parent=self)
+        except Exception:  # pragma: no cover - Qt dialog failures are environment specific
+            LOGGER.exception(
+                "Unable to open prompt for missing gap",
+                extra={
+                    "event": "missing_timeslot_prompt_failed",
+                    "start": timeslot.start.isoformat(),
+                    "end": timeslot.end.isoformat(),
+                },
+            )
+            QMessageBox.critical(
+                self,
+                "Prompt unavailable",
+                "The prompt window could not be opened for this gap. Please try again.",
+            )
+            self.statusBar().showMessage("Failed to open prompt for missing gap.", 6000)
+            return
+
+        LOGGER.info(
+            "Missing timeslot prompt opened",
+            extra={
+                "event": "missing_timeslot_prompt_opened",
+                "start": timeslot.start.isoformat(),
+                "end": timeslot.end.isoformat(),
+            },
+        )
+
+    def _handle_dismiss_missing(self, timeslot: MissingTimeslot) -> None:
+        key = timeslot.key()
+        if not any(slot.key() == key for slot in self._active_missing_timeslots):
+            return
+
+        self._missing_store.dismiss(timeslot)
+        LOGGER.info(
+            "Missing timeslot dismissed",
+            extra={
+                "event": "missing_timeslot_dismissed",
+                "start": timeslot.start.isoformat(),
+                "end": timeslot.end.isoformat(),
+            },
+        )
+
+        if timeslot.start.date() == timeslot.end.date():
+            label = (
+                f"{timeslot.start.strftime('%Y-%m-%d')} "
+                f"{timeslot.start.strftime('%H:%M')} → {timeslot.end.strftime('%H:%M')}"
+            )
+        else:
+            label = (
+                f"{timeslot.start.strftime('%Y-%m-%d %H:%M')} → "
+                f"{timeslot.end.strftime('%Y-%m-%d %H:%M')}"
+            )
+
+        self.statusBar().showMessage(f"Dismissed gap {label}.", 5000)
+        self._update_missing_timeslots(self._latest_entries)
+
     # ------------------------------------------------------------------
     def update_repository(self, repository: EntriesRepository) -> None:
         self._repository = repository
+        self._missing_store.refresh_path()
+        self._refresh_totals()
+
+    def apply_settings(self, settings: Settings) -> None:
+        self._settings = settings
+        self._missing_store.refresh_path()
         self._refresh_totals()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]

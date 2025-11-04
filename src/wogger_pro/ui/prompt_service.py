@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Dict, Iterable, Sequence
 
 from PySide6.QtCore import QObject, Qt
@@ -11,11 +12,14 @@ from PySide6.QtWidgets import QDialog, QMessageBox, QWidget
 
 from ..core.exceptions import PersistenceError
 from ..core.models import ScheduledSegment, SplitPart
+from ..core.missing_timeslots import MissingTimeslot
 from ..core.prompt_manager import PromptManager
 from ..core.time_segments import TimeRange
 from .manual_entry_dialog import ManualEntryDialog
 from .multi_remainder_dialog import MultiRemainderDialog, format_range_label
-from .prompt_dialog import PromptDialog, TaskSuggestion
+from .missing_timeslot_dialog import MissingTimeslotDialog
+from .prompt_dialog import PromptDialog
+from .task_inputs import TaskSuggestion
 from .sound_player import SoundPlayer
 
 LOGGER = logging.getLogger("wogger.ui.prompt_service")
@@ -32,7 +36,7 @@ class PromptService(QObject):
     ) -> None:
         super().__init__(parent)
         self._manager = prompt_manager
-        self._dialogs: Dict[str, PromptDialog] = {}
+        self._dialogs: Dict[str, PromptDialog | MissingTimeslotDialog] = {}
         self._cascade_index: int = 0
         self._cascade_step: int = 28
         self._cascade_cycle: int = 8
@@ -77,7 +81,13 @@ class PromptService(QObject):
         )
         self._open_multi_remainder_dialog(segment, remainders, intro_text=intro)
 
-    def _show_prompt_dialog(self, segment: ScheduledSegment, range_hint: str | None = None) -> None:
+    def _show_prompt_dialog(
+        self,
+        segment: ScheduledSegment,
+        range_hint: str | None = None,
+        *,
+        play_sound: bool = True,
+    ) -> None:
         if segment.segment_id in self._dialogs:
             dialog = self._dialogs[segment.segment_id]
             dialog.raise_()
@@ -96,7 +106,8 @@ class PromptService(QObject):
         self._dialogs[segment.segment_id] = dialog
 
         self._configure_popup(dialog)
-        self._play_prompt_sound()
+        if play_sound:
+            self._play_prompt_sound()
 
         dialog.submitted.connect(lambda task, seg_id=segment.segment_id: self._handle_submit(seg_id, task))
         dialog.split_saved.connect(lambda parts, seg_id=segment.segment_id: self._handle_split(seg_id, parts))
@@ -151,6 +162,57 @@ class PromptService(QObject):
         if total <= 1:
             return f"Remaining segment: {label}"
         return f"Remaining segment {index} of {total}: {label}"
+
+    def _handle_missing_submit(
+        self,
+        segment_id: str,
+        segment: ScheduledSegment,
+        task: str,
+        minutes: int,
+    ) -> None:
+        dialog = self._dialogs.get(segment_id)
+        effective_minutes = max(1, minutes)
+        new_end = segment.segment_start + timedelta(minutes=effective_minutes)
+        if new_end > segment.segment_end:
+            new_end = segment.segment_end
+
+        try:
+            self._manager.restrict_segment_to_range(
+                segment_id,
+                TimeRange(start=segment.segment_start, end=new_end),
+            )
+        except ValueError as exc:
+            LOGGER.warning("Invalid missing-timeslot adjustment: %s", exc)
+            if dialog:
+                dialog.notify_failure()
+            QMessageBox.warning(
+                dialog,
+                "Invalid duration",
+                "The selected duration must be at least one minute.",
+            )
+            return
+        except KeyError as exc:
+            LOGGER.warning("Missing segment disappeared before logging: %s", exc)
+            if dialog:
+                dialog.notify_failure()
+            QMessageBox.warning(
+                dialog,
+                "Missing timeslot",
+                "The gap is no longer available to log.",
+            )
+            return
+        except Exception as exc:  # pragma: no cover - defensive UI handling
+            LOGGER.exception("Unexpected error adjusting missing timeslot segment")
+            if dialog:
+                dialog.notify_failure()
+            QMessageBox.critical(
+                dialog,
+                "Unable to prepare entry",
+                str(exc),
+            )
+            return
+
+        self._handle_submit(segment_id, task)
 
     def _handle_submit(self, segment_id: str, task: str) -> None:
         dialog = self._dialogs.get(segment_id)
@@ -212,6 +274,64 @@ class PromptService(QObject):
             parent=parent,
         )
         dialog.exec()
+
+    def prompt_for_range(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        hint_prefix: str | None = None,
+        play_sound: bool = True,
+    ) -> ScheduledSegment:
+        """Open a prompt dialog for an ad-hoc time range."""
+
+        segment = self._manager.create_virtual_segment(start, end)
+        label = format_range_label(TimeRange(start=start, end=end))
+        hint = f"{hint_prefix}: {label}" if hint_prefix else f"Range: {label}"
+        self._show_prompt_dialog(segment, range_hint=hint, play_sound=play_sound)
+        return segment
+
+    def prompt_missing_timeslot(
+        self,
+        timeslot: MissingTimeslot,
+        parent: QWidget | None = None,
+    ) -> ScheduledSegment:
+        """Open the dedicated dialog for resolving a missing timeslot."""
+
+        segment = self._manager.create_virtual_segment(timeslot.start, timeslot.end)
+        before, after = self._manager.entries_around_range(timeslot.start, timeslot.end, limit=2)
+        suggestions = self._wrap_suggestions(self._manager.task_suggestions())
+
+        dialog = MissingTimeslotDialog(
+            segment=segment,
+            before_entries=before,
+            after_entries=after,
+            task_suggestions=suggestions,
+            task_suggestions_loader=lambda: self._wrap_suggestions(self._manager.task_suggestions()),
+            default_task=self._manager.last_task(),
+            parent=parent,
+        )
+
+        self._dialogs[segment.segment_id] = dialog
+        self._configure_popup(dialog)
+
+        dialog.submitted.connect(
+            lambda task, minutes, seg_id=segment.segment_id, seg=segment: self._handle_missing_submit(
+                seg_id, seg, task, minutes
+            )
+        )
+        dialog.dismissed.connect(lambda reason, seg_id=segment.segment_id: self._handle_dismiss(seg_id, reason))
+        dialog.finished.connect(lambda result, seg_id=segment.segment_id: self._on_dialog_finished(seg_id, result))
+
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if parent is not None:
+            self._center_over_parent(dialog, parent)
+            dialog.raise_()
+            dialog.activateWindow()
+
+        return segment
 
     def _on_segment_completed(self, segment_id: str, entry) -> None:
         LOGGER.info(
@@ -323,6 +443,18 @@ class PromptService(QObject):
                 return screen
 
         return QGuiApplication.primaryScreen()
+
+    def _center_over_parent(self, dialog: QDialog, parent: QWidget) -> None:
+        try:
+            parent_geom = parent.frameGeometry()
+            dialog_geom = dialog.frameGeometry()
+            if dialog_geom.width() == 0 or dialog_geom.height() == 0:
+                dialog_geom = dialog.geometry()
+            x = parent_geom.x() + (parent_geom.width() - dialog_geom.width()) // 2
+            y = parent_geom.y() + (parent_geom.height() - dialog_geom.height()) // 2
+            dialog.move(x, y)
+        except Exception:  # pragma: no cover - positioning is best effort
+            dialog.raise_()
 
     def _play_prompt_sound(self) -> None:
         if self._sound_player is None:

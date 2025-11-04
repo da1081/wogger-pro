@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from PySide6.QtCore import Qt, Signal
@@ -25,22 +24,9 @@ from PySide6.QtWidgets import (
 
 from ..core.models import ScheduledSegment, SplitPart
 from .icons import app_icon
+from .task_inputs import SuggestionComboBox, TaskSuggestion
 
 LOGGER = logging.getLogger("wogger.ui.prompt")
-
-
-@dataclass(slots=True)
-class TaskSuggestion:
-    task: str
-    count: int
-
-
-class SuggestionComboBox(QComboBox):
-    popup_about_to_show = Signal()
-
-    def showPopup(self) -> None:  # type: ignore[override]
-        self.popup_about_to_show.emit()
-        super().showPopup()
 
 
 class PromptDialog(QDialog):
@@ -76,6 +62,8 @@ class PromptDialog(QDialog):
         self._dismiss_reason = "closed"
         self._single_mode_width = 0
         self._split_mode_width = 0
+        self._single_mode_height = 0
+        self._split_mode_height = 0
 
         self._task_suggestions = list(task_suggestions)
         self._task_suggestions_loader = task_suggestions_loader
@@ -101,8 +89,8 @@ class PromptDialog(QDialog):
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         container = QVBoxLayout(self)
-        container.setContentsMargins(16, 16, 16, 16)
-        container.setSpacing(12)
+        container.setContentsMargins(12, 12, 12, 12)
+        container.setSpacing(8)
 
         self._header_label = QLabel(self._build_header_text())
         self._header_label.setWordWrap(True)
@@ -119,6 +107,7 @@ class PromptDialog(QDialog):
             self._range_hint_label = None
 
         self._stack = QStackedWidget(self)
+        self._stack.setContentsMargins(0, 0, 0, 0)
         self._single_widget = self._build_single_form()
         self._split_widget = self._build_split_form()
         self._stack.addWidget(self._single_widget)
@@ -147,11 +136,16 @@ class PromptDialog(QDialog):
         self._cancel_split_button.clicked.connect(self._exit_split_mode)
         self._close_button.clicked.connect(self._on_close_clicked)
 
+        box_layout = self._button_box.layout()
+        if box_layout is not None:
+            box_layout.setContentsMargins(0, 6, 0, 0)
+            box_layout.setSpacing(6)
+
     def _build_single_form(self) -> QWidget:
         widget = QWidget(self)
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(4)
 
         self._task_combo = SuggestionComboBox(widget)
         self._task_combo.setEditable(True)
@@ -166,8 +160,8 @@ class PromptDialog(QDialog):
     def _build_split_form(self) -> QWidget:
         widget = QWidget(self)
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(10)
 
         # Slider controls
         slider_row = QHBoxLayout()
@@ -220,21 +214,33 @@ class PromptDialog(QDialog):
         return widget
 
     def _configure_mode_sizes(self) -> None:
-        single_hint = self._single_widget.sizeHint()
-        split_hint = self._split_widget.sizeHint()
+        current = self._stack.currentWidget()
+
+        self._stack.setCurrentWidget(self._single_widget)
+        self._stack.updateGeometry()
+        single_hint = self.sizeHint()
+
+        self._stack.setCurrentWidget(self._split_widget)
+        self._stack.updateGeometry()
+        split_hint = self.sizeHint()
+
         base_split_width = max(split_hint.width(), single_hint.width())
         self._split_mode_width = max(base_split_width, 560)
         self._single_mode_width = max(320, self._split_mode_width // 2)
+        self._single_mode_height = single_hint.height()
+        self._split_mode_height = max(split_hint.height(), self._single_mode_height + 80)
+
+        self._stack.setCurrentWidget(current or self._single_widget)
         self._apply_mode_size(split=False)
 
     def _apply_mode_size(self, *, split: bool) -> None:
         if self._split_mode_width <= 0 or self._single_mode_width <= 0:
             return
         target_width = self._split_mode_width if split else self._single_mode_width
-        hint = self.sizeHint()
-        target_height = hint.height()
+        target_height = self._split_mode_height if split else self._single_mode_height
         self.setMinimumWidth(target_width)
         self.setMaximumWidth(target_width)
+        self.setMinimumHeight(target_height)
         self.resize(target_width, target_height)
         self._stack.updateGeometry()
         self.updateGeometry()
@@ -242,7 +248,7 @@ class PromptDialog(QDialog):
     def _build_header_text(self) -> str:
         start = self._segment.segment_start.strftime("%Y-%m-%d %H:%M")
         end = self._segment.segment_end.strftime("%Y-%m-%d %H:%M")
-        return f"Log your work for {start} to {end} ({self._segment.minutes} minutes)."
+        return f"{start} → {end} ({self._segment.minutes} minutes)"
 
     # ------------------------------------------------------------------
     def _deduplicated_suggestions(self) -> list[TaskSuggestion]:

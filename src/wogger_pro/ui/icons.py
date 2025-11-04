@@ -19,6 +19,12 @@ PLUS_ICON_NAMES: tuple[str, ...] = (
     "mdi.plus",
 )
 
+MINUS_ICON_NAMES: tuple[str, ...] = (
+    "fa5s.minus",
+    "fa6s.minus",
+    "mdi.minus",
+)
+
 TRASH_ICON_NAMES: tuple[str, ...] = (
     "fa5s.trash",
     "fa5s.trash-alt",
@@ -48,6 +54,20 @@ IMPORT_ICON_NAMES: tuple[str, ...] = (
     "fa6s.file-import",
     "mdi.database-import",
     "mdi.import",
+)
+
+BACKUP_ON_ICON_NAMES: tuple[str, ...] = (
+    "fa5s.sync-alt",
+    "fa5s.sync",
+    "fa6s.arrows-rotate",
+    "mdi.sync",
+)
+
+BACKUP_OFF_ICON_NAMES: tuple[str, ...] = (
+    "fa5s.stop-circle",
+    "fa5s.ban",
+    "fa6s.circle-xmark",
+    "mdi.stop-circle",
 )
 
 SOUND_ON_ICON_NAMES: tuple[str, ...] = (
@@ -172,6 +192,12 @@ def plus_icon(size: int = 24) -> QIcon:
     return _qtawesome_icon(PLUS_ICON_NAMES, size, role="accent")
 
 
+def minus_icon(size: int = 24) -> QIcon:
+    """Return the QtAwesome minus icon styled for the current theme."""
+
+    return _qtawesome_icon(MINUS_ICON_NAMES, size, role="accent")
+
+
 def trash_icon(size: int = 20) -> QIcon:
     """Return the QtAwesome trash icon styled for the current theme."""
 
@@ -194,6 +220,18 @@ def import_icon(size: int = 20) -> QIcon:
     """Return the import icon styled for the current theme."""
 
     return _qtawesome_icon(IMPORT_ICON_NAMES, size, role="control")
+
+
+def backup_on_icon(size: int = 20) -> QIcon:
+    """Return the icon used when recurring backups are enabled."""
+
+    return _qtawesome_icon(BACKUP_ON_ICON_NAMES, size, role="control")
+
+
+def backup_off_icon(size: int = 20) -> QIcon:
+    """Return the icon used when recurring backups are disabled."""
+
+    return _qtawesome_icon(BACKUP_OFF_ICON_NAMES, size, role="control")
 
 
 def sound_on_icon(size: int = 22) -> QIcon:

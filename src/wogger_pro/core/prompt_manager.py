@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Sequence
+from typing import Dict, Iterable, Optional, Sequence
 
 from PySide6.QtCore import QObject, Signal
 
@@ -40,6 +40,7 @@ class PromptManager(QObject):
         self._logger = logger or logging.getLogger("wogger.prompts")
         self._pending_segments: dict[str, ScheduledSegment] = {}
         self._last_task: Optional[str] = None
+        self._category_cache: Dict[str, str | None] = {}
 
         self._scheduler.segment_ready.connect(self._handle_segment_ready)
 
@@ -70,15 +71,21 @@ class PromptManager(QObject):
     def update_repository(self, repository: EntriesRepository) -> None:
         """Swap the underlying repository used for persistence."""
         self._repository = repository
+        self._category_cache.clear()
 
     def rename_task(self, old_task: str, new_task: str) -> int:
         updated = self._repository.rename_task(old_task, new_task)
         if updated and self._last_task == old_task:
             self._last_task = new_task
+        if updated:
+            self._category_cache.pop(old_task.strip(), None)
+            self._category_cache.pop(new_task.strip(), None)
         return updated
 
     def set_task_category(self, task: str, category: str | None) -> int:
-        return self._repository.assign_category_to_task(task, category)
+        updated = self._repository.assign_category_to_task(task, category)
+        self._update_category_cache(task, category)
+        return updated
 
     def refresh_last_task(self) -> None:
         last_entry = self._repository.get_last_entry()
@@ -87,6 +94,7 @@ class PromptManager(QObject):
     def notify_entries_replaced(self) -> None:
         """Notify listeners that the repository entries have been replaced."""
 
+        self._category_cache.clear()
         self.entries_replaced.emit()
 
     def range_conflicts(self, start: datetime, end: datetime) -> list[SegmentConflict]:
@@ -101,6 +109,29 @@ class PromptManager(QObject):
         if not subtractors:
             return [base]
         return sort_ranges(subtract(base, subtractors))
+
+    def entries_around_range(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        limit: int = 2,
+    ) -> tuple[list[Entry], list[Entry]]:
+        """Return the entries immediately before and after a time range."""
+
+        entries = self._repository.get_all_entries()
+
+        before = [entry for entry in entries if entry.segment_end <= start]
+        before.sort(key=lambda entry: (entry.segment_end, entry.segment_start))
+        if limit > 0:
+            before = before[-limit:]
+
+        after = [entry for entry in entries if entry.segment_start >= end]
+        after.sort(key=lambda entry: (entry.segment_start, entry.segment_end))
+        if limit > 0:
+            after = after[:limit]
+
+        return before, after
 
     def manual_entry_defaults(self) -> tuple[datetime, datetime]:
         now = datetime.now().replace(second=0, microsecond=0)
@@ -129,18 +160,24 @@ class PromptManager(QObject):
         if duration_minutes < 1:
             raise ValueError("Manual entry must be at least one minute long")
 
+        normalized_task = task.strip()
+        if not normalized_task:
+            raise ValueError("Task is required for manual entry")
+
+        category = self._resolve_category_for_task(normalized_task)
         try:
-            entry = self._repository.add_entry(task, start, end, duration_minutes)
+            entry = self._repository.add_entry(normalized_task, start, end, duration_minutes, category=category)
         except PersistenceError:
             self._logger.exception("Failed to persist manual entry", extra={"event": "manual_entry_failed"})
             raise
 
-        self._last_task = task
+        self._last_task = normalized_task
+        self._update_category_cache(normalized_task, entry.category)
         self._logger.info(
             "Manual entry recorded",
             extra={
                 "event": "manual_entry_saved",
-                "task": task,
+                "task": normalized_task,
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "minutes": duration_minutes,
@@ -192,15 +229,29 @@ class PromptManager(QObject):
         if segment is None:
             raise KeyError(f"Unknown segment: {segment_id}")
 
-        entries: list[Entry] = []
-        for rng, task in zip(remainders, tasks):
-            task = task.strip()
-            if not task:
+        normalized_tasks: list[str] = []
+        for task in tasks:
+            value = task.strip()
+            if not value:
                 raise ValueError("Task is required for each remainder")
+            normalized_tasks.append(value)
+
+        category_map = self._categories_for_tasks(normalized_tasks)
+
+        entries: list[Entry] = []
+        for rng, task_name in zip(remainders, normalized_tasks):
             minutes = minutes_between(rng.start, rng.end)
             if minutes < 1:
                 raise ValueError("Remainder duration must be at least one minute")
-            entries.append(Entry(task=task, segment_start=rng.start, segment_end=rng.end, minutes=minutes))
+            entries.append(
+                Entry(
+                    task=task_name,
+                    segment_start=rng.start,
+                    segment_end=rng.end,
+                    minutes=minutes,
+                    category=category_map.get(task_name),
+                )
+            )
 
         try:
             persisted = self._repository.add_entries_batch(entries)
@@ -212,7 +263,9 @@ class PromptManager(QObject):
             self._pending_segments[segment_id] = segment
             raise
 
-        self._last_task = tasks[-1]
+        self._last_task = normalized_tasks[-1]
+        for entry in persisted:
+            self._update_category_cache(entry.task, entry.category)
         self._logger.info(
             "Remainder entries saved",
             extra={
@@ -227,8 +280,19 @@ class PromptManager(QObject):
 
     def complete_segment(self, segment_id: str, task: str) -> Entry:
         segment = self._pop_segment(segment_id)
+        normalized_task = task.strip()
+        if not normalized_task:
+            self._pending_segments[segment.segment_id] = segment
+            raise ValueError("Task cannot be empty")
+        category = self._resolve_category_for_task(normalized_task)
         try:
-            entry = self._repository.add_entry(task, segment.segment_start, segment.segment_end, segment.minutes)
+            entry = self._repository.add_entry(
+                normalized_task,
+                segment.segment_start,
+                segment.segment_end,
+                segment.minutes,
+                category=category,
+            )
         except PersistenceError as exc:
             self._logger.exception(
                 "Failed to persist segment",
@@ -238,13 +302,14 @@ class PromptManager(QObject):
             self.error_occurred.emit(exc)
             raise
 
-        self._last_task = task
+        self._last_task = normalized_task
+        self._update_category_cache(normalized_task, entry.category)
         self._logger.info(
             "Segment completed",
             extra={
                 "event": "prompt_completed",
                 "segment_id": segment.segment_id,
-                "task": task,
+                "task": normalized_task,
                 "minutes": segment.minutes,
             },
         )
@@ -262,12 +327,28 @@ class PromptManager(QObject):
         if any(part.minutes < 1 for part in parts_list):
             raise ValueError("Split minutes must be >= 1")
 
+        normalized_tasks = []
+        for part in parts_list:
+            value = part.task.strip()
+            if not value:
+                self._pending_segments[segment.segment_id] = segment
+                raise ValueError("Task is required for each split part")
+            normalized_tasks.append(value)
+
+        category_map = self._categories_for_tasks(normalized_tasks)
+
         entries_to_persist: list[Entry] = []
         cursor = segment.segment_start
-        for part in parts_list:
+        for part, task_name in zip(parts_list, normalized_tasks):
             next_cursor = cursor + timedelta(minutes=part.minutes)
             entries_to_persist.append(
-                Entry(task=part.task, segment_start=cursor, segment_end=next_cursor, minutes=part.minutes)
+                Entry(
+                    task=task_name,
+                    segment_start=cursor,
+                    segment_end=next_cursor,
+                    minutes=part.minutes,
+                    category=category_map.get(task_name),
+                )
             )
             cursor = next_cursor
 
@@ -282,7 +363,9 @@ class PromptManager(QObject):
             self.error_occurred.emit(exc)
             raise
 
-        self._last_task = parts_list[-1].task
+        self._last_task = normalized_tasks[-1]
+        for entry in persisted:
+            self._update_category_cache(entry.task, entry.category)
         self._logger.info(
             "Segment split saved",
             extra={
@@ -315,6 +398,38 @@ class PromptManager(QObject):
             extra={"event": "prompt_requeued", "segment_id": segment.segment_id},
         )
         self.prompt_ready.emit(segment)
+
+    # ------------------------------------------------------------------
+    def _resolve_category_for_task(self, task: str) -> str | None:
+        normalized = task.strip()
+        if not normalized:
+            return None
+        if normalized in self._category_cache:
+            return self._category_cache[normalized]
+        category = self._repository.task_category(normalized)
+        self._category_cache[normalized] = category
+        return category
+
+    def _update_category_cache(self, task: str, category: str | None) -> None:
+        normalized = task.strip()
+        if not normalized:
+            return
+        cleaned = category.strip() if isinstance(category, str) and category.strip() else None
+        self._category_cache[normalized] = cleaned
+
+    def _categories_for_tasks(self, tasks: Iterable[str]) -> dict[str, str | None]:
+        mapping: dict[str, str | None] = {}
+        for task in tasks:
+            normalized = task.strip()
+            if not normalized:
+                continue
+            if normalized in self._category_cache:
+                mapping[normalized] = self._category_cache[normalized]
+            else:
+                category = self._repository.task_category(normalized)
+                self._category_cache[normalized] = category
+                mapping[normalized] = category
+        return mapping
 
     # ------------------------------------------------------------------
     def _handle_segment_ready(self, segment: ScheduledSegment) -> None:

@@ -44,6 +44,7 @@ class Settings:
     recurring_backup_interval_days: int = 1
     recurring_backup_retention_days: int = 7
     recurring_backup_path: str = field(default_factory=lambda: str(recurring_backups_dir()))
+    missing_timeslot_threshold_minutes: int = 240
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -65,11 +66,14 @@ class Settings:
         interval_days = int(payload.get("recurring_backup_interval_days", 1) or 1)
         retention_days = int(payload.get("recurring_backup_retention_days", 7) or 1)
         recurring_path = str(payload.get("recurring_backup_path") or recurring_backups_dir()).strip()
+        missing_threshold = int(payload.get("missing_timeslot_threshold_minutes", 240) or 0)
 
         if interval_days < 1:
             raise SettingsError("Recurring backup interval must be at least 1 day")
         if retention_days < 1 or retention_days > 100:
             raise SettingsError("Recurring backup retention must be between 1 and 100 days")
+        if missing_threshold < 0:
+            raise SettingsError("Missing timeslot threshold must be zero or greater")
 
         return cls(
             theme=Theme(theme_value),
@@ -82,6 +86,7 @@ class Settings:
             recurring_backup_interval_days=interval_days,
             recurring_backup_retention_days=retention_days,
             recurring_backup_path=recurring_path,
+            missing_timeslot_threshold_minutes=missing_threshold,
         )
 
 
@@ -137,6 +142,7 @@ class SettingsManager:
                 "recurring_backup_interval_days": settings.recurring_backup_interval_days,
                 "recurring_backup_retention_days": settings.recurring_backup_retention_days,
                 "recurring_backup_path": settings.recurring_backup_path,
+                "missing_timeslot_threshold_minutes": settings.missing_timeslot_threshold_minutes,
             },
         )
         return settings
@@ -156,6 +162,7 @@ class SettingsManager:
                 "recurring_backup_interval_days": settings.recurring_backup_interval_days,
                 "recurring_backup_retention_days": settings.recurring_backup_retention_days,
                 "recurring_backup_path": settings.recurring_backup_path,
+                "missing_timeslot_threshold_minutes": settings.missing_timeslot_threshold_minutes,
             },
         )
         _validate_cron(settings.prompt_cron)
@@ -165,6 +172,8 @@ class SettingsManager:
             raise SettingsError("Recurring backup interval must be at least 1 day")
         if settings.recurring_backup_retention_days < 1 or settings.recurring_backup_retention_days > 100:
             raise SettingsError("Recurring backup retention must be between 1 and 100 days")
+        if settings.missing_timeslot_threshold_minutes < 0:
+            raise SettingsError("Missing timeslot threshold must be zero or greater")
 
         temp_path = self._path.with_suffix(".tmp")
         try:

@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from ..core.exceptions import PersistenceError, SegmentConflictError
 from ..core.prompt_manager import PromptManager
 from ..core.time_segments import minutes_between
-from .prompt_dialog import SuggestionComboBox, TaskSuggestion
+from .task_inputs import SuggestionComboBox, TaskSuggestion
 
 
 class WatchingDateTimeEdit(QDateTimeEdit):
@@ -84,9 +84,18 @@ class ManualEntryDialog(QDialog):
         self._start_edit.setDisplayFormat("yyyy-MM-dd HH:mm")
         self._start_edit.setCalendarPopup(True)
         self._start_edit.dateTimeChanged.connect(self._on_start_changed)
-        form.addRow("Start", self._start_edit)
+
+        start_row = QHBoxLayout()
+        start_row.setContentsMargins(0, 0, 0, 0)
+        start_row.setSpacing(8)
+        start_row.addWidget(self._start_edit, 1)
+
+        start_container = QWidget(self)
+        start_container.setLayout(start_row)
+        form.addRow("Start", start_container)
 
         end_row = QHBoxLayout()
+        end_row.setContentsMargins(0, 0, 0, 0)
         end_row.setSpacing(8)
 
         self._end_edit = WatchingDateTimeEdit(self)

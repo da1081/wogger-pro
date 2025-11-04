@@ -178,6 +178,27 @@ class EntriesRepository:
             return None
         return max(entries, key=lambda entry: (entry.segment_end, entry.segment_start))
 
+    def task_category(self, task: str) -> str | None:
+        """Return the most recent non-empty category assigned to a task."""
+
+        normalized_task = task.strip()
+        if not normalized_task:
+            return None
+
+        latest: Entry | None = None
+        for entry in self.get_all_entries():
+            if entry.task.strip() != normalized_task:
+                continue
+            category = (entry.category or "").strip()
+            if not category:
+                continue
+            if latest is None or (entry.segment_end, entry.segment_start) > (
+                latest.segment_end,
+                latest.segment_start,
+            ):
+                latest = entry
+        return latest.category if latest else None
+
     def rename_task(self, old_task: str, new_task: str) -> int:
         old_task = old_task.strip()
         new_task = new_task.strip()

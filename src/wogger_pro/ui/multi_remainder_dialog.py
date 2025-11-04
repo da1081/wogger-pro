@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from ..core.time_segments import TimeRange
 from .icons import add_palette_listener, remove_palette_listener, trash_icon
-from .prompt_dialog import SuggestionComboBox, TaskSuggestion
+from .task_inputs import SuggestionComboBox, TaskSuggestion
 
 
 def format_range_label(range_: TimeRange) -> str:

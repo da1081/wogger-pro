@@ -20,6 +20,7 @@ RESOURCES_DIRNAME = "resources"
 APP_ICON_FILENAME = "wogger.ico"
 ALERT_SOUND_FILENAME = "wogger.wav"
 CATEGORIES_FILENAME = "categories.json"
+IGNORED_MISSING_TIMESLOTS_FILENAME = "ignored-missing-timeslots.json"
 DATA_POINTER_FILENAME = f"{APP_NAME}-data-dir.json"
 
 _DATA_DIR_OVERRIDE: Path | None = None
@@ -137,6 +138,9 @@ def ensure_app_structure() -> None:
     categories_file = categories_path()
     if not categories_file.exists():
         categories_file.write_text("[]", encoding="utf-8")
+    ignore_file = ignored_missing_timeslots_path()
+    if not ignore_file.exists():
+        ignore_file.write_text("[]", encoding="utf-8")
 
 
 def default_downloads_dir() -> Path:
@@ -204,3 +208,7 @@ def alert_sound_path() -> Path:
 
 def categories_path() -> Path:
     return app_data_dir() / CATEGORIES_FILENAME
+
+
+def ignored_missing_timeslots_path() -> Path:
+    return app_data_dir() / IGNORED_MISSING_TIMESLOTS_FILENAME
