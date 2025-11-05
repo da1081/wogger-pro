@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from ..core.categories import CategoryManager
 from ..core.exceptions import PersistenceError
+from ..core.features import DISABLE_UPDATE_CHECK
 from ..core.models import Entry, TaskSummary
 from ..core.missing_timeslots import MissingTimeslot, MissingTimeslotStore, detect_missing_timeslots
 from ..core.prompt_manager import PromptManager
@@ -434,6 +435,11 @@ class MainWindow(QMainWindow):
         self._prompt_manager.entries_replaced.connect(self._refresh_totals)
 
     def _check_for_updates(self) -> None:
+        if DISABLE_UPDATE_CHECK:
+            LOGGER.debug("Update check skipped (feature disabled)")
+            if self._update_button is not None:
+                self._update_button.setVisible(False)
+            return
         if self._network_manager is None:
             return
         if self._update_button is not None and self._update_button.isVisible():
