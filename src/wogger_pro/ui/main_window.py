@@ -63,8 +63,8 @@ from .task_edit_dialog import TaskEditDialog
 
 LOGGER = logging.getLogger("wogger.ui.main")
 
-LATEST_RELEASE_API_URL = "https://api.github.com/repos/da1081/wogger-pro/releases/latest"
-LATEST_RELEASE_WEB_URL = "https://github.com/da1081/wogger-pro/releases/latest"
+LATEST_RELEASE_API_URL = "http://api.github.com/repos/da1081/wogger-pro/releases/latest"
+LATEST_RELEASE_WEB_URL = "http://github.com/da1081/wogger-pro/releases/latest"
 _VERSION_SEGMENT_RE = re.compile(r"^(\d+)")
 
 
@@ -438,61 +438,86 @@ class MainWindow(QMainWindow):
             return
         if self._update_button is not None and self._update_button.isVisible():
             return
-        request = QNetworkRequest(QUrl(LATEST_RELEASE_API_URL))
-        user_agent = f"WoggerPro/{self._current_version}" if self._current_version else "WoggerPro/unknown"
-        request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, user_agent)
-        follow_attr = getattr(QNetworkRequest, "FollowRedirectsAttribute", None)
-        if follow_attr is None:
-            follow_attr = getattr(getattr(QNetworkRequest, "Attribute", object), "FollowRedirectsAttribute", None)
-        if follow_attr is not None:
-            request.setAttribute(follow_attr, True)
-        if hasattr(request, "setTransferTimeout"):
-            request.setTransferTimeout(5000)
-        reply = self._network_manager.get(request)
+        try:
+            request = QNetworkRequest(QUrl(LATEST_RELEASE_API_URL))
+            user_agent = f"WoggerPro/{self._current_version}" if self._current_version else "WoggerPro/unknown"
+            request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, user_agent)
+            follow_attr = getattr(QNetworkRequest, "FollowRedirectsAttribute", None)
+            if follow_attr is None:
+                follow_attr = getattr(getattr(QNetworkRequest, "Attribute", object), "FollowRedirectsAttribute", None)
+            if follow_attr is not None:
+                request.setAttribute(follow_attr, True)
+            if hasattr(request, "setTransferTimeout"):
+                request.setTransferTimeout(5000)
+            reply = self._network_manager.get(request)
+        except Exception:
+            LOGGER.exception("Unable to start update check", extra={"event": "update_check_error"})
+            return
         reply.finished.connect(partial(self._on_update_reply, reply))
 
     def _on_update_reply(self, reply: QNetworkReply) -> None:
         if reply is None:
             return
-        error = reply.error()
-        data = bytes(reply.readAll())
-        reply.deleteLater()
+        try:
+            error = reply.error()
+            data = bytes(reply.readAll())
+        except Exception:
+            LOGGER.exception("Unable to read update response", extra={"event": "update_check_error"})
+            try:
+                reply.deleteLater()
+            except Exception:
+                LOGGER.debug("Failed to dispose update reply", exc_info=True)
+            return
+
+        try:
+            reply.deleteLater()
+        except Exception:
+            LOGGER.debug("Failed to dispose update reply", exc_info=True)
+
         if error != QNetworkReply.NetworkError.NoError:
             LOGGER.debug("Update check failed: %s", reply.errorString())
             return
+
         try:
             payload = json.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            LOGGER.debug("Unable to parse update response: %s", exc)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            LOGGER.exception("Unable to parse update response", extra={"event": "update_check_error"})
             return
-        if payload.get("draft") or payload.get("prerelease"):
-            LOGGER.debug("Latest release is draft or prerelease; skipping notification.")
+        except Exception:
+            LOGGER.exception("Unexpected error parsing update response", extra={"event": "update_check_error"})
             return
-        tag = str(payload.get("tag_name") or "").strip()
-        normalized_tag = _normalize_version_tag(tag)
-        latest_tuple = _version_tuple(normalized_tag)
-        current_tuple = self._current_version_tuple
-        if current_tuple is None and not self._current_version:
-            LOGGER.debug("Current version unknown; skipping update notification")
-            return
-        update_available = False
-        if latest_tuple and current_tuple:
-            update_available = latest_tuple > current_tuple
-        elif latest_tuple and current_tuple is None and self._current_version:
-            update_available = True
-        elif normalized_tag and self._current_version:
-            update_available = normalized_tag != self._current_version
-        if not update_available:
-            LOGGER.debug(
-                "No update available (current=%s, latest=%s)",
-                self._current_version,
-                normalized_tag,
-            )
-            return
-        release_url = str(payload.get("html_url") or LATEST_RELEASE_WEB_URL)
-        version_label = tag or normalized_tag
-        LOGGER.info("Update available", extra={"event": "update_available", "version": version_label})
-        self._show_update_available(version_label, release_url)
+
+        try:
+            if payload.get("draft") or payload.get("prerelease"):
+                LOGGER.debug("Latest release is draft or prerelease; skipping notification.")
+                return
+            tag = str(payload.get("tag_name") or "").strip()
+            normalized_tag = _normalize_version_tag(tag)
+            latest_tuple = _version_tuple(normalized_tag)
+            current_tuple = self._current_version_tuple
+            if current_tuple is None and not self._current_version:
+                LOGGER.debug("Current version unknown; skipping update notification")
+                return
+            update_available = False
+            if latest_tuple and current_tuple:
+                update_available = latest_tuple > current_tuple
+            elif latest_tuple and current_tuple is None and self._current_version:
+                update_available = True
+            elif normalized_tag and self._current_version:
+                update_available = normalized_tag != self._current_version
+            if not update_available:
+                LOGGER.debug(
+                    "No update available (current=%s, latest=%s)",
+                    self._current_version,
+                    normalized_tag,
+                )
+                return
+            release_url = str(payload.get("html_url") or LATEST_RELEASE_WEB_URL)
+            version_label = tag or normalized_tag
+            LOGGER.info("Update available", extra={"event": "update_available", "version": version_label})
+            self._show_update_available(version_label, release_url)
+        except Exception:
+            LOGGER.exception("Unexpected error while processing update response", extra={"event": "update_check_error"})
 
     def _show_update_available(self, version_label: str, release_url: str) -> None:
         if self._update_button is None:

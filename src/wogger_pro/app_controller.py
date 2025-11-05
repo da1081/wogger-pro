@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QDialog, QApplication, QMessageBox  # type: ignore
 
 from .core.category_consistency import analyze_category_consistency
 from .core.categories import CategoryManager
+from .core.exception_logging import install_global_exception_logger
 from .core.exceptions import PersistenceError, SettingsError
 from .core.logging_config import configure_logging, reset_logging
 from .core.paths import ensure_app_structure, recurring_backups_dir, set_app_data_directory
@@ -53,6 +54,7 @@ class ApplicationController:
         set_app_data_directory(Path(self._settings.app_data_path).expanduser())
         ensure_app_structure()
         configure_logging()
+        install_global_exception_logger()
         install_qt_message_handler()
         # Rebuild manager to ensure it points at the active app data directory
         self._settings_manager = SettingsManager()
