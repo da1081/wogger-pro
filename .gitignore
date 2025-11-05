@@ -17,6 +17,7 @@ pip-delete-this-directory.txt
 
 # PyInstaller
 *.spec
+!wogger_pro.spec
 *.manifest
 *.tmp
 

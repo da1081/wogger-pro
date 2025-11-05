@@ -39,19 +39,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install pyinstaller pyinstaller-hooks-contrib
           pip install .
 
       - name: Build EXE using PyInstaller
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --windowed --onefile --name wogger-pro `
-            --icon resources/wogger.ico `
-            --add-data "resources/*;resources" `
-            --collect-all qtawesome `
-            --hidden-import PySide6.QtMultimedia `
-            --hidden-import PySide6.QtMultimediaWidgets `
-            src/wogger_pro/__main__.py
+          pyinstaller --noconfirm --clean wogger_pro.spec
 
       - name: Upload EXE as an Artifact
         uses: actions/upload-artifact@v4

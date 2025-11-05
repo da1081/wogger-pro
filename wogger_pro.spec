@@ -1,0 +1,105 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller build specification for Wogger Pro."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_all  # type: ignore[import]
+
+project_root = Path(sys.argv[0]).resolve().parent
+src_root = project_root / "src"
+entry_point = src_root / "wogger_pro" / "__main__.py"
+resources_dir = project_root / "resources"
+
+
+def _collect_openssl_binaries() -> list[tuple[str, str]]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    binaries: list[tuple[str, str]] = []
+
+    search_roots = {
+        Path(sys.base_prefix) / "DLLs",
+        Path(sys.exec_prefix) / "DLLs",
+    }
+
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for pattern in ("libssl-3*.dll", "libcrypto-3*.dll"):
+            for dll in root.glob(pattern):
+                key = dll.resolve().name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                binaries.append((str(dll.resolve()), "."))
+
+    if not any("libssl" in path.lower() for path, _ in binaries):
+        raise SystemExit("OpenSSL runtime library (libssl-3*.dll) not found in Python DLLs directory")
+    if not any("libcrypto" in path.lower() for path, _ in binaries):
+        raise SystemExit("OpenSSL runtime library (libcrypto-3*.dll) not found in Python DLLs directory")
+
+    return binaries
+
+
+qtawesome_datas, qtawesome_binaries, qtawesome_hiddenimports = collect_all("qtawesome")
+
+openssl_binaries = _collect_openssl_binaries()
+
+binaries = openssl_binaries + qtawesome_binaries
+
+datas = [(str(resources_dir), "resources")] + qtawesome_datas
+
+hiddenimports = [
+    "PySide6.QtMultimedia",
+    "PySide6.QtMultimediaWidgets",
+] + qtawesome_hiddenimports
+
+block_cipher = None
+
+
+a = Analysis(
+    [str(entry_point)],
+    pathex=[str(src_root)],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(
+    a.pure,
+    a.zipped_data,
+    cipher=block_cipher,
+)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name="wogger-pro",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=str(resources_dir / "wogger.ico"),
+)
