@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import partial
+from importlib import metadata
 from typing import Optional, Callable, Sequence
 
-from PySide6.QtCore import Qt, Signal, QSize, QTimer, QModelIndex
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QModelIndex, QUrl
+from PySide6.QtGui import QPalette, QDesktopServices
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -22,9 +29,12 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStatusBar,
     QTableView,
+    QTabWidget,
     QDialog,
     QStyledItemDelegate,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -44,13 +54,37 @@ from .icons import (
     plus_icon,
     remove_palette_listener,
     settings_icon,
+    update_available_icon,
 )
-from .category_picker import CategoryTreePicker
+from .category_picker import CATEGORY_PATH_SEPARATOR, CategoryTreePicker
 from .prompt_service import PromptService
 from .task_totals_model import TaskTotalsModel
 from .task_edit_dialog import TaskEditDialog
 
 LOGGER = logging.getLogger("wogger.ui.main")
+
+LATEST_RELEASE_API_URL = "https://api.github.com/repos/da1081/wogger-pro/releases/latest"
+LATEST_RELEASE_WEB_URL = "https://github.com/da1081/wogger-pro/releases/latest"
+_VERSION_SEGMENT_RE = re.compile(r"^(\d+)")
+
+
+def _normalize_version_tag(tag: str) -> str:
+    tag = tag.strip()
+    if tag.lower().startswith("v"):
+        tag = tag[1:]
+    return tag
+
+
+def _version_tuple(value: str | None) -> tuple[int, ...] | None:
+    if not value:
+        return None
+    parts: list[int] = []
+    for segment in value.split("."):
+        match = _VERSION_SEGMENT_RE.match(segment)
+        if not match:
+            return None
+        parts.append(int(match.group(1)))
+    return tuple(parts)
 
 
 class FilterMode(Enum):
@@ -64,6 +98,20 @@ class FilterState:
     mode: FilterMode
     start: Optional[datetime] = None
     end: Optional[datetime] = None
+
+
+NO_CATEGORY_LABEL = "(No category)"
+
+
+class _CategoryTreeNode:
+    __slots__ = ("name", "minutes", "children", "path", "path_lower")
+
+    def __init__(self, name: str, path: tuple[str, ...], path_lower: tuple[str, ...]) -> None:
+        self.name = name
+        self.path = path
+        self.path_lower = path_lower
+        self.minutes = 0
+        self.children: dict[str, "_CategoryTreeNode"] = {}
 
 
 class CategoryDelegate(QStyledItemDelegate):
@@ -122,7 +170,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Wogger (Pro)")
-        self.resize(700, 500)
+        self.resize(800, 500)
         icon = app_icon()
         if icon is not None:
             self.setWindowIcon(icon)
@@ -143,6 +191,16 @@ class MainWindow(QMainWindow):
         self._category_manager = CategoryManager()
 
         self._model = TaskTotalsModel()
+        self._tabs: QTabWidget | None = None
+        self._category_tree: QTreeWidget | None = None
+        self._category_order_map: dict[tuple[str, ...], int] = {}
+        self._category_order_fallback_base: int = 0
+        self._category_order_names: dict[tuple[str, ...], str] = {}
+        self._network_manager = QNetworkAccessManager(self)
+        self._update_button: QToolButton | None = None
+        self._latest_release_url = LATEST_RELEASE_WEB_URL
+        self._current_version = self._resolve_current_version()
+        self._current_version_tuple = _version_tuple(self._current_version) if self._current_version else None
 
         self._build_ui()
         self._connect_signals()
@@ -150,6 +208,7 @@ class MainWindow(QMainWindow):
         add_palette_listener(self._palette_listener)
         self._refresh_icons()
         self._refresh_totals()
+        QTimer.singleShot(750, self._check_for_updates)
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -166,6 +225,7 @@ class MainWindow(QMainWindow):
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.setAlternatingRowColors(True)
+        self._table.setTextElideMode(Qt.ElideRight)
         self._table.setEditTriggers(
             QAbstractItemView.DoubleClicked
             | QAbstractItemView.SelectedClicked
@@ -174,11 +234,14 @@ class MainWindow(QMainWindow):
         vheader = self._table.verticalHeader()
         vheader.setFixedWidth(12)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._task_column_min_width = 230
+        header.setSectionResizeMode(0, QHeaderView.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.sectionResized.connect(self._enforce_task_column_min_width)
+        header.resizeSection(0, max(header.sectionSize(0), self._task_column_min_width))
         self._table.doubleClicked.connect(self._on_row_double_clicked)
         self._category_delegate = CategoryDelegate(
             category_provider=self._category_manager.list_categories,
@@ -186,7 +249,43 @@ class MainWindow(QMainWindow):
             parent=self._table,
         )
         self._table.setItemDelegateForColumn(1, self._category_delegate)
-        layout.addWidget(self._table, 1)
+
+        tasks_tab = QWidget(self)
+        tasks_layout = QVBoxLayout(tasks_tab)
+        tasks_layout.setContentsMargins(0, 0, 0, 0)
+        tasks_layout.setSpacing(0)
+        tasks_layout.addWidget(self._table)
+
+        self._category_tree = QTreeWidget(self)
+        self._category_tree.setObjectName("categoryTotalsTree")
+        self._category_tree.setColumnCount(3)
+        self._category_tree.setHeaderLabels(["Category", "Minutes", "Duration"])
+        header = self._category_tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.setStretchLastSection(False)
+        self._category_tree.setUniformRowHeights(True)
+        self._category_tree.setRootIsDecorated(True)
+        self._category_tree.setAlternatingRowColors(True)
+        self._category_tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._category_tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._category_tree.setAllColumnsShowFocus(True)
+
+        categories_tab = QWidget(self)
+        categories_layout = QVBoxLayout(categories_tab)
+        categories_layout.setContentsMargins(0, 0, 0, 0)
+        categories_layout.setSpacing(0)
+        categories_layout.addWidget(self._category_tree)
+
+        self._tabs = QTabWidget(self)
+        self._tabs.setDocumentMode(True)
+        self._tabs.addTab(tasks_tab, "Tasks")
+        self._tabs.addTab(categories_tab, "Categories")
+        layout.addWidget(self._tabs, 1)
+        self._tabs.currentChanged.connect(self._apply_active_tab_style)
+        self._apply_active_tab_style()
         missing_panel = self._build_missing_panel()
         layout.addWidget(missing_panel)
 
@@ -199,6 +298,21 @@ class MainWindow(QMainWindow):
         self._summary_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
         status.addPermanentWidget(self._summary_label)
         self._update_status_bar()
+
+    def _apply_active_tab_style(self, _index: int | None = None) -> None:
+        if self._tabs is None:
+            return
+        tab_bar = self._tabs.tabBar()
+        palette = tab_bar.palette()
+        base_bg = palette.color(QPalette.Button)
+        base_fg = palette.color(QPalette.ButtonText)
+        highlight_bg = palette.color(QPalette.Highlight)
+        highlight_fg = palette.color(QPalette.HighlightedText)
+        stylesheet = (
+            f"QTabBar::tab {{ background-color: {base_bg.name()}; color: {base_fg.name()}; padding: 0px 12px; min-height: 5px; }}"
+            f"QTabBar::tab:selected, QTabBar::tab:hover {{ background-color: {highlight_bg.name()}; color: {highlight_fg.name()}; }}"
+        )
+        tab_bar.setStyleSheet(stylesheet)
 
     def _build_controls_bar(self) -> QWidget:
         container = QWidget(self)
@@ -239,6 +353,14 @@ class MainWindow(QMainWindow):
         right_layout = QHBoxLayout()
         right_layout.setSpacing(8)
 
+        self._update_button = QToolButton(container)
+        self._update_button.setAutoRaise(True)
+        self._update_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self._update_button.setIconSize(QSize(22, 22))
+        self._update_button.setToolTip("Update ready")
+        self._update_button.setVisible(False)
+        self._update_button.clicked.connect(self._open_latest_release)
+
         self._manual_entry_button = QToolButton(container)
         self._manual_entry_button.setToolTip("Add a manual custom time segment")
         self._manual_entry_button.setAutoRaise(True)
@@ -251,6 +373,7 @@ class MainWindow(QMainWindow):
         self._settings_button.setIconSize(QSize(22, 22))
         self._settings_button.setToolTip("Settings")
 
+        right_layout.addWidget(self._update_button)
         right_layout.addWidget(self._manual_entry_button)
         right_layout.addWidget(self._settings_button)
 
@@ -310,6 +433,120 @@ class MainWindow(QMainWindow):
         self._prompt_manager.manual_entry_saved.connect(lambda _entry: self._refresh_totals())
         self._prompt_manager.entries_replaced.connect(self._refresh_totals)
 
+    def _check_for_updates(self) -> None:
+        if self._network_manager is None:
+            return
+        if self._update_button is not None and self._update_button.isVisible():
+            return
+        request = QNetworkRequest(QUrl(LATEST_RELEASE_API_URL))
+        user_agent = f"WoggerPro/{self._current_version}" if self._current_version else "WoggerPro/unknown"
+        request.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, user_agent)
+        follow_attr = getattr(QNetworkRequest, "FollowRedirectsAttribute", None)
+        if follow_attr is None:
+            follow_attr = getattr(getattr(QNetworkRequest, "Attribute", object), "FollowRedirectsAttribute", None)
+        if follow_attr is not None:
+            request.setAttribute(follow_attr, True)
+        if hasattr(request, "setTransferTimeout"):
+            request.setTransferTimeout(5000)
+        reply = self._network_manager.get(request)
+        reply.finished.connect(partial(self._on_update_reply, reply))
+
+    def _on_update_reply(self, reply: QNetworkReply) -> None:
+        if reply is None:
+            return
+        error = reply.error()
+        data = bytes(reply.readAll())
+        reply.deleteLater()
+        if error != QNetworkReply.NetworkError.NoError:
+            LOGGER.debug("Update check failed: %s", reply.errorString())
+            return
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            LOGGER.debug("Unable to parse update response: %s", exc)
+            return
+        if payload.get("draft") or payload.get("prerelease"):
+            LOGGER.debug("Latest release is draft or prerelease; skipping notification.")
+            return
+        tag = str(payload.get("tag_name") or "").strip()
+        normalized_tag = _normalize_version_tag(tag)
+        latest_tuple = _version_tuple(normalized_tag)
+        current_tuple = self._current_version_tuple
+        if current_tuple is None and not self._current_version:
+            LOGGER.debug("Current version unknown; skipping update notification")
+            return
+        update_available = False
+        if latest_tuple and current_tuple:
+            update_available = latest_tuple > current_tuple
+        elif latest_tuple and current_tuple is None and self._current_version:
+            update_available = True
+        elif normalized_tag and self._current_version:
+            update_available = normalized_tag != self._current_version
+        if not update_available:
+            LOGGER.debug(
+                "No update available (current=%s, latest=%s)",
+                self._current_version,
+                normalized_tag,
+            )
+            return
+        release_url = str(payload.get("html_url") or LATEST_RELEASE_WEB_URL)
+        version_label = tag or normalized_tag
+        LOGGER.info("Update available", extra={"event": "update_available", "version": version_label})
+        self._show_update_available(version_label, release_url)
+
+    def _show_update_available(self, version_label: str, release_url: str) -> None:
+        if self._update_button is None:
+            return
+        self._latest_release_url = release_url or LATEST_RELEASE_WEB_URL
+        tooltip = "Update ready"
+        if version_label:
+            tooltip = f"Update ready ({version_label})"
+        self._update_button.setToolTip(tooltip)
+        self._update_button.setAutoRaise(True)
+        self._update_button.setStyleSheet("")
+        self._update_button.setVisible(True)
+        self._refresh_icons()
+
+    def _open_latest_release(self) -> None:
+        target = QUrl(self._latest_release_url)
+        if not target.isValid():
+            target = QUrl(LATEST_RELEASE_WEB_URL)
+        QDesktopServices.openUrl(target)
+
+    def _resolve_current_version(self) -> str | None:
+        env_version = os.environ.get("WOGGER_PRO_VERSION")
+        if env_version:
+            return env_version.strip()
+        try:
+            from .. import __version__ as package_version  # type: ignore
+        except ImportError:
+            package_version = None
+        except Exception:  # pragma: no cover - defensive
+            LOGGER.exception("Unable to import package version")
+            package_version = None
+        if package_version:
+            return str(package_version).strip()
+        try:
+            return metadata.version("wogger-pro")
+        except metadata.PackageNotFoundError:
+            LOGGER.debug("Package version not found; running from source.")
+        except Exception:  # pragma: no cover - defensive guard
+            LOGGER.exception("Unable to determine application version")
+        return None
+
+    # ------------------------------------------------------------------
+    def _enforce_task_column_min_width(self, logical_index: int, _old_size: int, new_size: int) -> None:
+        if logical_index != 0 or new_size >= self._task_column_min_width:
+            return
+        header = self._table.horizontalHeader()
+        if header is None:
+            return
+        header.blockSignals(True)
+        try:
+            header.resizeSection(0, self._task_column_min_width)
+        finally:
+            header.blockSignals(False)
+
     # ------------------------------------------------------------------
     def _on_filter_toggled(self, button_id: int, checked: bool) -> None:
         if not checked:
@@ -350,6 +587,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Invalid range", "Please select a valid start and end time.")
                 self._latest_entries = []
                 self._update_missing_timeslots([])
+                self._update_category_tree([])
                 return
             entries = self._repository.get_entries_by_range(self._filter_state.start, self._filter_state.end)
 
@@ -359,6 +597,7 @@ class MainWindow(QMainWindow):
 
         summaries = self._build_summaries(entries)
         self._model.update_rows(summaries)
+        self._update_category_tree(entries)
         self._update_summary_totals(summaries)
         self._update_status_bar()
         self._log_filter_change(len(entries))
@@ -385,6 +624,125 @@ class MainWindow(QMainWindow):
             summaries.append(TaskSummary(task=task_name, total_minutes=total_minutes, category=category))
         summaries.sort(key=lambda summary: (-summary.total_minutes, summary.task.lower()))
         return summaries
+
+    def _update_category_tree(self, entries: list[Entry]) -> None:
+        if self._category_tree is None:
+            return
+
+        tree = self._category_tree
+        tree.blockSignals(True)
+        tree.clear()
+
+        self._rebuild_category_order()
+
+        if not entries:
+            placeholder = QTreeWidgetItem(["No entries in range", "", ""])
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            placeholder.setFirstColumnSpanned(True)
+            tree.addTopLevelItem(placeholder)
+            tree.blockSignals(False)
+            return
+
+        root = _CategoryTreeNode("<root>", (), ())
+        nodes_by_lower: dict[tuple[str, ...], _CategoryTreeNode] = {(): root}
+
+        for entry in entries:
+            minutes = max(int(entry.minutes), 0)
+            raw_category = (entry.category or "").strip()
+            parts = [segment.strip() for segment in raw_category.split(CATEGORY_PATH_SEPARATOR)] if raw_category else []
+            parts = [segment for segment in parts if segment]
+            if not parts:
+                parts = [NO_CATEGORY_LABEL]
+
+            parent_lower: tuple[str, ...] = ()
+            parent_node = root
+            parent_node.minutes += minutes
+            for part in parts:
+                current_lower = parent_lower + (part.lower(),)
+                node = nodes_by_lower.get(current_lower)
+                if node is None:
+                    canonical = self._category_order_names.get(current_lower, part)
+                    current_path = parent_node.path + (canonical,)
+                    node = _CategoryTreeNode(canonical, current_path, current_lower)
+                    nodes_by_lower[current_lower] = node
+                    parent_node.children[canonical] = node
+                node.minutes += minutes
+                parent_node = node
+                parent_lower = current_lower
+
+        top_nodes = self._ordered_children(root)
+        if not top_nodes:
+            placeholder = QTreeWidgetItem(["No categories found", "", ""])
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            placeholder.setFirstColumnSpanned(True)
+            tree.addTopLevelItem(placeholder)
+            tree.blockSignals(False)
+            return
+
+        for node in top_nodes:
+            tree.addTopLevelItem(self._build_category_tree_item(node))
+
+        tree.expandAll()
+        tree.blockSignals(False)
+
+    def _ordered_children(self, node: _CategoryTreeNode) -> list[_CategoryTreeNode]:
+        children = list(node.children.values())
+        children.sort(key=self._category_node_sort_key)
+        return children
+
+    def _category_node_sort_key(self, node: _CategoryTreeNode) -> tuple[int, str, str]:
+        order = self._category_order_map.get(node.path_lower)
+        if order is None:
+            if node.name == NO_CATEGORY_LABEL:
+                order = self._category_order_fallback_base + 2_000_000
+            else:
+                order = self._category_order_fallback_base + 1_000_000
+        return (order, node.name.lower(), node.name)
+
+    def _build_category_tree_item(self, node: _CategoryTreeNode) -> QTreeWidgetItem:
+        minutes_text = self._format_minutes_value(node.minutes)
+        duration_text = self._format_duration(node.minutes)
+        item = QTreeWidgetItem([node.name, minutes_text, duration_text])
+        item.setData(0, Qt.ItemDataRole.UserRole, node.name.lower())
+        item.setData(1, Qt.ItemDataRole.UserRole, node.minutes)
+        item.setData(2, Qt.ItemDataRole.UserRole, node.minutes)
+        tooltip = f"{node.minutes} minute{'s' if node.minutes != 1 else ''}"
+        item.setToolTip(0, node.name)
+        item.setToolTip(1, tooltip)
+        item.setToolTip(2, duration_text)
+        item.setTextAlignment(1, int(Qt.AlignRight | Qt.AlignVCenter))
+        item.setTextAlignment(2, int(Qt.AlignRight | Qt.AlignVCenter))
+        for child in self._ordered_children(node):
+            item.addChild(self._build_category_tree_item(child))
+        return item
+
+    def _rebuild_category_order(self) -> None:
+        categories = self._category_manager.list_categories()
+        order_map: dict[tuple[str, ...], int] = {}
+        name_map: dict[tuple[str, ...], str] = {}
+        next_index = 0
+        for category in categories:
+            parts = [segment.strip() for segment in category.split(CATEGORY_PATH_SEPARATOR) if segment.strip()]
+            if not parts:
+                continue
+            parent_lower: tuple[str, ...] = ()
+            for part in parts:
+                current_lower = parent_lower + (part.lower(),)
+                if current_lower not in order_map:
+                    order_map[current_lower] = next_index
+                    name_map[current_lower] = part
+                    next_index += 1
+                parent_lower = current_lower
+        self._category_order_map = order_map
+        self._category_order_names = name_map
+        self._category_order_fallback_base = next_index
+
+
+    def _format_minutes_value(self, minutes: int) -> str:
+        return f"{minutes:,}" if minutes else "0"
+
+    def _format_duration(self, minutes: int) -> str:
+        return TaskSummary(task="", total_minutes=minutes).pretty_total
 
     def _update_missing_timeslots(self, entries: list[Entry]) -> None:
         if self._missing_panel is None or self._missing_rows_layout is None:
@@ -543,6 +901,7 @@ class MainWindow(QMainWindow):
         if button is None:
             return
         icon_targets = [
+            ("_update_button", update_available_icon, 22),
             ("_manual_entry_button", plus_icon, 24),
             ("_calendar_button", calendar_icon, 22),
             ("_settings_button", settings_icon, 22),
@@ -554,6 +913,7 @@ class MainWindow(QMainWindow):
             size = btn.iconSize()
             dimension = max(size.width(), size.height(), fallback_size)
             btn.setIcon(factory(dimension))
+        self._apply_active_tab_style()
 
     def _update_status_bar(self) -> None:
         if self._filter_state.mode == FilterMode.TODAY:

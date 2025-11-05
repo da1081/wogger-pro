@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtGui import QFontMetrics, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -114,6 +114,7 @@ class CategoryTreePicker(QWidget):
         self._line_edit.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._line_edit.setObjectName("categoryTreePickerLineEdit")
         self._line_edit.installEventFilter(self)
+        self._full_display_text = ""
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -123,6 +124,10 @@ class CategoryTreePicker(QWidget):
         layout.addWidget(self._line_edit, 1)
 
         self.set_categories([])
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_elided_text()
 
     # ------------------------------------------------------------------
     def set_categories(self, categories: Sequence[str]) -> None:
@@ -247,12 +252,28 @@ class CategoryTreePicker(QWidget):
         return "(No category)" if self._allow_none else ""
 
     def _update_line_display(self) -> None:
-        self._line_edit.setText(self._display_text_for_current())
+        self._full_display_text = self._display_text_for_current()
+        self._apply_elided_text()
         if self._current_category:
             self._line_edit.setToolTip(self._current_category)
         else:
             tooltip = "" if not self._allow_none else "(No category)"
             self._line_edit.setToolTip(tooltip)
+
+    def _apply_elided_text(self) -> None:
+        full_text = self._full_display_text
+        if not full_text:
+            if self._line_edit.text():
+                self._line_edit.clear()
+            return
+        available_width = self._line_edit.contentsRect().width()
+        if available_width <= 0:
+            display_text = full_text
+        else:
+            metrics = QFontMetrics(self._line_edit.font())
+            display_text = metrics.elidedText(full_text, Qt.TextElideMode.ElideRight, available_width)
+        if self._line_edit.text() != display_text:
+            self._line_edit.setText(display_text)
 
     def _rebuild_model(self) -> None:
         self._model = QStandardItemModel()

@@ -49,3 +49,6 @@ logs/
 # Local resources and backups
 *.bak
 *.orig
+
+# Development files
+*.dev*

@@ -56,7 +56,7 @@ class CsvImportDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Import CSV Data")
+        self.setWindowTitle("Import legacy Wogger CSV Data")
         self.setModal(True)
         self._repository = repository
         self._prompt_manager = prompt_manager

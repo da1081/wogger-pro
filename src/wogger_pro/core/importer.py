@@ -1,8 +1,9 @@
-"""Utilities for importing entries from legacy Wogger CSV exports."""
+"""Utilities for importing entries from legacy Wogger CSV and JF LoggR exports."""
 
 from __future__ import annotations
 
 import csv
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -171,6 +172,108 @@ def _parse_time(value: str) -> datetime.time:
 
 def _entry_key(entry: Entry):
     return entry.segment_start, entry.segment_end, entry.task.lower()
+
+
+def parse_jf_loggr_json(path: Path) -> list[Entry]:
+    """Parse entries from a JF LoggR JSON export."""
+
+    if not path.exists():
+        raise ImportValidationError(f"File does not exist: {path}")
+    if path.suffix.lower() != ".json":
+        raise ImportValidationError("Selected file is not a JSON document.")
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except ImportValidationError:
+        raise
+    except json.JSONDecodeError as exc:
+        raise ImportValidationError(f"Invalid JSON format: {exc.msg} (line {exc.lineno})") from exc
+    except Exception as exc:  # pragma: no cover - unexpected parsing failure
+        raise ImportValidationError(f"Unable to read JSON file: {exc}") from exc
+
+    entries_payload = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries_payload, list):
+        raise ImportValidationError("JSON file is missing an 'entries' list.")
+
+    entries: list[Entry] = []
+    for index, item in enumerate(entries_payload, start=1):
+        if not isinstance(item, dict):
+            raise ImportValidationError(f"Entry {index}: expected an object.")
+        try:
+            entry = _jf_loggr_item_to_entry(item)
+        except ImportValidationError as exc:
+            raise ImportValidationError(f"Entry {index}: {exc}") from exc
+        entries.append(entry)
+
+    if not entries:
+        raise ImportValidationError("The JSON file does not contain any entries to import.")
+
+    entries.sort(key=_entry_key)
+    return entries
+
+
+def _jf_loggr_item_to_entry(payload: dict[str, object]) -> Entry:
+    try:
+        day_value = str(payload["day"]).strip()
+    except KeyError as exc:
+        raise ImportValidationError("Missing 'day' field.") from exc
+    except Exception as exc:
+        raise ImportValidationError("Invalid 'day' value.") from exc
+    if not day_value:
+        raise ImportValidationError("Day cannot be empty.")
+
+    try:
+        start_value = str(payload["start"]).strip()
+    except KeyError as exc:
+        raise ImportValidationError("Missing 'start' field.") from exc
+    except Exception as exc:
+        raise ImportValidationError("Invalid 'start' value.") from exc
+    if not start_value:
+        raise ImportValidationError("Start time cannot be empty.")
+
+    try:
+        end_value = str(payload["end"]).strip()
+    except KeyError as exc:
+        raise ImportValidationError("Missing 'end' field.") from exc
+    except Exception as exc:
+        raise ImportValidationError("Invalid 'end' value.") from exc
+    if not end_value:
+        raise ImportValidationError("End time cannot be empty.")
+
+    description = payload.get("description", "")
+    task = str(description).strip()
+    if not task:
+        raise ImportValidationError("Description cannot be empty.")
+
+    date_obj = _parse_date(day_value)
+    start_time = _parse_time(start_value)
+    end_time = _parse_time(end_value)
+
+    start = datetime.combine(date_obj, start_time)
+    end = datetime.combine(date_obj, end_time)
+
+    if end <= start:
+        raise ImportValidationError("End time must be after start time.")
+
+    delta_seconds = int((end - start).total_seconds())
+    if delta_seconds <= 0:
+        raise ImportValidationError("Entry duration must be positive.")
+    if delta_seconds % 60 != 0:
+        raise ImportValidationError("Entry duration must be in whole minutes.")
+
+    minutes = delta_seconds // 60
+
+    category_raw = payload.get("category", "")
+    category = str(category_raw).strip() or None
+
+    return Entry(
+        task=task,
+        segment_start=start,
+        segment_end=end,
+        minutes=minutes,
+        category=category,
+    )
 
 
 def _prefer_imported_merge(

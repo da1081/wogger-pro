@@ -56,6 +56,13 @@ IMPORT_ICON_NAMES: tuple[str, ...] = (
     "mdi.import",
 )
 
+UPDATE_ICON_NAMES: tuple[str, ...] = (
+    "fa5s.cloud-download-alt",
+    "fa5s.download",
+    "fa6s.cloud-arrow-down",
+    "mdi.download",
+)
+
 BACKUP_ON_ICON_NAMES: tuple[str, ...] = (
     "fa5s.sync-alt",
     "fa5s.sync",
@@ -110,6 +117,7 @@ _DEFAULT_PALETTE = IconPalette(
         "accent": IconColor(normal="#0f172a", active="#1d4ed8"),
         "danger": IconColor(normal="#1f2937", active="#ef4444"),
         "control": IconColor(normal="#1f2937", active="#2563eb"),
+        "success": IconColor(normal="#047857", active="#16a34a"),
     }
 )
 
@@ -220,6 +228,12 @@ def import_icon(size: int = 20) -> QIcon:
     """Return the import icon styled for the current theme."""
 
     return _qtawesome_icon(IMPORT_ICON_NAMES, size, role="control")
+
+
+def update_available_icon(size: int = 20) -> QIcon:
+    """Return the update notification icon styled for the standard control palette."""
+
+    return _qtawesome_icon(UPDATE_ICON_NAMES, size, role="control")
 
 
 def backup_on_icon(size: int = 20) -> QIcon:

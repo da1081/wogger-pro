@@ -36,6 +36,7 @@ from ..core.repository import EntriesRepository
 from ..core.settings import DEFAULT_PROMPT_CRON, Settings, Theme
 from .categories_dialog import CategoriesDialog
 from .csv_import_dialog import CsvImportDialog
+from .jf_loggr_import_dialog import JfLoggrImportDialog
 from .icons import (
     add_palette_listener,
     app_icon,
@@ -214,21 +215,43 @@ class SettingsDialog(QDialog):
         layout.addRow("Recurring backups", recurring_widget)
 
         import_widget = QWidget(self)
-        import_layout = QHBoxLayout(import_widget)
+        import_layout = QVBoxLayout(import_widget)
         import_layout.setContentsMargins(0, 0, 0, 0)
-        import_layout.setSpacing(8)
+        import_layout.setSpacing(6)
 
-        self._import_button = QPushButton("Import CSV Data…", self)
+        legacy_row = QWidget(import_widget)
+        legacy_layout = QHBoxLayout(legacy_row)
+        legacy_layout.setContentsMargins(0, 0, 0, 0)
+        legacy_layout.setSpacing(8)
+
+        self._import_button = QPushButton("Import legacy Wogger CSV Data…", self)
         try:
             self._import_button.setIcon(import_icon())
         except Exception:  # pragma: no cover - icon fallback
             LOGGER.debug("Import icon unavailable", exc_info=True)
         self._import_button.setToolTip("Import legacy Wogger CSV exports")
         self._import_button.clicked.connect(self._on_import_clicked)
-        import_layout.addWidget(self._import_button)
-        import_layout.addStretch(1)
+        legacy_layout.addWidget(self._import_button)
+        legacy_layout.addStretch(1)
+        import_layout.addWidget(legacy_row)
 
-        layout.addRow("Legacy Wogger import", import_widget)
+        jf_row = QWidget(import_widget)
+        jf_layout = QHBoxLayout(jf_row)
+        jf_layout.setContentsMargins(0, 0, 0, 0)
+        jf_layout.setSpacing(8)
+
+        self._jf_loggr_button = QPushButton("Import from JF LoggR…", self)
+        try:
+            self._jf_loggr_button.setIcon(import_icon())
+        except Exception:  # pragma: no cover - icon fallback
+            LOGGER.debug("Import icon unavailable", exc_info=True)
+        self._jf_loggr_button.setToolTip("Import entries from a JF LoggR worklogger.json export")
+        self._jf_loggr_button.clicked.connect(self._on_import_jf_loggr_clicked)
+        jf_layout.addWidget(self._jf_loggr_button)
+        jf_layout.addStretch(1)
+        import_layout.addWidget(jf_row)
+
+        layout.addRow("Data import", import_widget)
 
         categories_widget = QWidget(self)
         categories_layout = QHBoxLayout(categories_widget)
@@ -420,6 +443,18 @@ class SettingsDialog(QDialog):
             result = dialog.exec()
         except Exception as exc:  # pragma: no cover - Qt dialog errors are user specific
             LOGGER.exception("Import dialog failed")
+            QMessageBox.critical(self, "Import failed", str(exc))
+            return
+
+        if result == QDialog.DialogCode.Accepted:
+            self._clear_error()
+
+    def _on_import_jf_loggr_clicked(self) -> None:
+        dialog = JfLoggrImportDialog(self._repository, self._prompt_manager, parent=self)
+        try:
+            result = dialog.exec()
+        except Exception as exc:  # pragma: no cover - Qt dialog errors are user specific
+            LOGGER.exception("JF LoggR import dialog failed")
             QMessageBox.critical(self, "Import failed", str(exc))
             return
 

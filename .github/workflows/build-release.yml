@@ -9,9 +9,27 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Generate Version Number
+        id: version
+        shell: pwsh
+        run: echo "version=1.0.$(Get-Date -Format yyyyMMddHHmmss)" >> $env:GITHUB_OUTPUT
+
+      - name: Stamp version metadata
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $lines = @(
+            '"""Build metadata for Wogger Pro."""',
+            '',
+            "APP_VERSION = `"$version`""
+          )
+          Set-Content -Path src/wogger_pro/_build_info.py -Value $lines -Encoding UTF8
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,6 +62,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -53,9 +73,6 @@ jobs:
         with:
           name: wogger-pro.exe
           path: dist
-
-      - name: Generate Version Number
-        run: echo "VERSION=1.0.$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
 
       - name: Generate Release Notes
         shell: bash
