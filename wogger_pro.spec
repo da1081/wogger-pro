@@ -20,6 +20,7 @@ qtawesome_datas, qtawesome_binaries, qtawesome_hiddenimports = collect_all("qtaw
 binaries = qtawesome_binaries
 
 datas = [(str(resources_dir), "resources")] + qtawesome_datas
+datas.append((str(project_root / "qt.conf"), "."))
 
 hiddenimports = [
     "PySide6.QtNetwork",
@@ -69,7 +70,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=["PySide6/Qt/plugins/tls/*"],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
