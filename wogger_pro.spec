@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all  # type: ignore[import]
+import PySide6
 
 project_root = Path(sys.argv[0]).resolve().parent
 src_root = project_root / "src"
@@ -21,11 +22,17 @@ binaries = qtawesome_binaries
 datas = [(str(resources_dir), "resources")] + qtawesome_datas
 
 hiddenimports = [
+    "PySide6.QtNetwork",
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
 ] + qtawesome_hiddenimports
 
 block_cipher = None
+
+plugins_dir = Path(PySide6.__file__).parent / "Qt" / "plugins"
+tls_dir = plugins_dir / "tls"
+if tls_dir.exists():
+    datas.append((str(tls_dir), "tls"))
 
 
 a = Analysis(

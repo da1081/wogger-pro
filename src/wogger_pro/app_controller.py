@@ -7,6 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from PySide6.QtNetwork import QSslSocket  # type: ignore[import]
 from PySide6.QtWidgets import QDialog, QApplication, QMessageBox  # type: ignore[import]
 
 from .core.category_consistency import analyze_category_consistency
@@ -34,6 +35,16 @@ LOGGER = logging.getLogger("wogger.app")
 
 class ApplicationController:
     def __init__(self, app: QApplication) -> None:
+        try:
+            QSslSocket.setActiveBackend("schannel")
+        except Exception:
+            LOGGER.warning("Failed to activate Schannel TLS backend", exc_info=True)
+        else:
+            LOGGER.info(
+                "TLS backends available=%s, active=%s",
+                list(QSslSocket.availableBackends()),
+                QSslSocket.activeBackend(),
+            )
         self._app = app
         self._startup_aborted = False
         self._scheduler: PromptScheduler | None = None
