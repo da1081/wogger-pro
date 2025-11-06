@@ -62,9 +62,10 @@ jobs:
 
           $unique = $found | Sort-Object FullName -Unique
           if ($unique.Count -ge 2) {
-            "OPENSSL_DLL_LIST<<'EOF'" | Out-File -FilePath $env:GITHUB_ENV -Append
-            ($unique | Select-Object -ExpandProperty FullName) | Out-File -FilePath $env:GITHUB_ENV -Append
-            "EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+            $envLines = @("OPENSSL_DLL_LIST<<EOF")
+            $envLines += ($unique | ForEach-Object { $_.FullName })
+            $envLines += "EOF"
+            $envLines | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
             Write-Host "Located OpenSSL DLLs:"
             $unique | Select-Object Name, FullName | Format-Table -AutoSize | Out-String | Write-Host
           } else {
@@ -89,9 +90,10 @@ jobs:
           if ($unique.Count -lt 2) {
             throw "OpenSSL fallback did not provide both libssl and libcrypto DLLs"
           }
-          "OPENSSL_DLL_LIST<<'EOF'" | Out-File -FilePath $env:GITHUB_ENV -Append
-          ($unique | Select-Object -ExpandProperty FullName) | Out-File -FilePath $env:GITHUB_ENV -Append
-          "EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $envLines = @("OPENSSL_DLL_LIST<<EOF")
+          $envLines += ($unique | ForEach-Object { $_.FullName })
+          $envLines += "EOF"
+          $envLines | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Validate OpenSSL DLL list
         shell: pwsh
