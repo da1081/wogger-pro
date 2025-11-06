@@ -41,9 +41,10 @@ class ApplicationController:
             LOGGER.warning("Failed to activate Schannel TLS backend", exc_info=True)
         else:
             LOGGER.info(
-                "TLS backends available=%s, active=%s",
+                "Qt TLS: available=%s active=%s supportsSsl=%s",
                 list(QSslSocket.availableBackends()),
                 QSslSocket.activeBackend(),
+                QSslSocket.supportsSsl(),
             )
         self._app = app
         self._startup_aborted = False

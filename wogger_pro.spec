@@ -32,7 +32,7 @@ block_cipher = None
 plugins_dir = Path(PySide6.__file__).parent / "Qt" / "plugins"
 tls_dir = plugins_dir / "tls"
 if tls_dir.exists():
-    datas.append((str(tls_dir), "tls"))
+    datas.append((str(tls_dir), "PySide6/Qt/plugins/tls"))
 
 
 a = Analysis(
