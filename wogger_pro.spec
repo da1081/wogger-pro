@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -15,30 +16,58 @@ resources_dir = project_root / "resources"
 
 
 def _collect_openssl_binaries() -> list[tuple[str, str]]:
-    candidates: list[Path] = []
-    seen: set[str] = set()
     binaries: list[tuple[str, str]] = []
+    seen: set[str] = set()
 
-    search_roots = {
-        Path(sys.base_prefix) / "DLLs",
-        Path(sys.exec_prefix) / "DLLs",
-    }
+    # Prefer an explicit list provided by the build pipeline
+    dll_list = os.environ.get("OPENSSL_DLL_LIST", "").strip()
+    if dll_list:
+        for line in dll_list.splitlines():
+            candidate = Path(line).expanduser().resolve()
+            if not candidate.exists() or candidate.suffix.lower() != ".dll":
+                continue
+            key = candidate.name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            binaries.append((str(candidate), "."))
 
-    for root in search_roots:
-        if not root.exists():
-            continue
-        for pattern in ("libssl-3*.dll", "libcrypto-3*.dll"):
-            for dll in root.glob(pattern):
-                key = dll.resolve().name.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                binaries.append((str(dll.resolve()), "."))
+    # Fallback search across common locations on GitHub runners.
+    if not binaries:
+        patterns = ("libssl-3*.dll", "libcrypto-3*.dll")
+        search_roots: set[Path] = {
+            Path(sys.base_prefix) / "DLLs",
+            Path(sys.exec_prefix) / "DLLs",
+        }
 
-    if not any("libssl" in path.lower() for path, _ in binaries):
-        raise SystemExit("OpenSSL runtime library (libssl-3*.dll) not found in Python DLLs directory")
-    if not any("libcrypto" in path.lower() for path, _ in binaries):
-        raise SystemExit("OpenSSL runtime library (libcrypto-3*.dll) not found in Python DLLs directory")
+        python_location = os.environ.get("PythonLocation")
+        if python_location:
+            base = Path(python_location)
+            search_roots.update({
+                base,
+                base / "DLLs",
+                base / "bin",
+            })
+
+        for root in list(search_roots):
+            if not root.exists():
+                continue
+            for pattern in patterns:
+                for dll in root.rglob(pattern):
+                    resolved = dll.resolve()
+                    key = resolved.name.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    binaries.append((str(resolved), "."))
+
+    has_ssl = any("libssl-3" in path.lower() for path, _ in binaries)
+    has_crypto = any("libcrypto-3" in path.lower() for path, _ in binaries)
+    if not (has_ssl and has_crypto):
+        raise SystemExit(
+            "Unable to locate required OpenSSL runtime libraries. "
+            "Set OPENSSL_DLL_LIST or ensure libssl-3* and libcrypto-3* DLLs are discoverable."
+        )
 
     return binaries
 

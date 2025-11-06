@@ -42,6 +42,66 @@ jobs:
           pip install pyinstaller pyinstaller-hooks-contrib
           pip install .
 
+      - name: Locate OpenSSL runtime DLLs
+        shell: pwsh
+        run: |
+          Write-Host "PythonLocation: $env:PythonLocation"
+          $patterns = @('libssl-3*.dll', 'libcrypto-3*.dll')
+          $candidateRoots = @(
+            "$env:PythonLocation",
+            "$env:PythonLocation\DLLs",
+            "$env:PythonLocation\bin"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+
+          $found = @()
+          foreach ($root in $candidateRoots) {
+            foreach ($pattern in $patterns) {
+              $found += Get-ChildItem -Path $root -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue
+            }
+          }
+
+          $unique = $found | Sort-Object FullName -Unique
+          if ($unique.Count -ge 2) {
+            "OPENSSL_DLL_LIST<<'EOF'" | Out-File -FilePath $env:GITHUB_ENV -Append
+            ($unique | Select-Object -ExpandProperty FullName) | Out-File -FilePath $env:GITHUB_ENV -Append
+            "EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "Located OpenSSL DLLs:"
+            $unique | Select-Object Name, FullName | Format-Table -AutoSize | Out-String | Write-Host
+          } else {
+            Write-Host "OpenSSL DLLs not found under PythonLocation roots."
+          }
+
+      - name: Install OpenSSL fallback
+        if: env.OPENSSL_DLL_LIST == ''
+        shell: pwsh
+        run: |
+          choco install -y openssl-light
+          $bin = 'C:\Program Files\OpenSSL-Win64\bin'
+          if (-not (Test-Path $bin)) {
+            throw "OpenSSL installed but directory not found: $bin"
+          }
+          $patterns = @('libssl-3*.dll', 'libcrypto-3*.dll')
+          $found = @()
+          foreach ($pattern in $patterns) {
+            $found += Get-ChildItem -Path $bin -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue
+          }
+          $unique = $found | Sort-Object FullName -Unique
+          if ($unique.Count -lt 2) {
+            throw "OpenSSL fallback did not provide both libssl and libcrypto DLLs"
+          }
+          "OPENSSL_DLL_LIST<<'EOF'" | Out-File -FilePath $env:GITHUB_ENV -Append
+          ($unique | Select-Object -ExpandProperty FullName) | Out-File -FilePath $env:GITHUB_ENV -Append
+          "EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Validate OpenSSL DLL list
+        shell: pwsh
+        run: |
+          if (-not $env:OPENSSL_DLL_LIST) {
+            throw 'OPENSSL_DLL_LIST is not set; cannot bundle OpenSSL runtime DLLs.'
+          }
+          Write-Host "Bundling OpenSSL DLLs:"
+          ($env:OPENSSL_DLL_LIST -split "`n") | ForEach-Object { Write-Host " - $_" }
+
       - name: Build EXE using PyInstaller
         shell: pwsh
         run: |

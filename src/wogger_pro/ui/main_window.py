@@ -64,8 +64,8 @@ from .task_edit_dialog import TaskEditDialog
 
 LOGGER = logging.getLogger("wogger.ui.main")
 
-LATEST_RELEASE_API_URL = "http://api.github.com/repos/da1081/wogger-pro/releases/latest"
-LATEST_RELEASE_WEB_URL = "http://github.com/da1081/wogger-pro/releases/latest"
+LATEST_RELEASE_API_URL = "https://api.github.com/repos/da1081/wogger-pro/releases/latest"
+LATEST_RELEASE_WEB_URL = "https://github.com/da1081/wogger-pro/releases/latest"
 _VERSION_SEGMENT_RE = re.compile(r"^(\d+)")
 
 
