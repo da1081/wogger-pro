@@ -76,7 +76,7 @@ jobs:
         if: env.OPENSSL_DLL_LIST == ''
         shell: pwsh
         run: |
-          choco install -y openssl-light
+          choco install -y openssl
           $bin = 'C:\Program Files\OpenSSL-Win64\bin'
           if (-not (Test-Path $bin)) { throw "OpenSSL installed but $bin not found" }
 
