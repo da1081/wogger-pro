@@ -42,58 +42,54 @@ jobs:
           pip install pyinstaller pyinstaller-hooks-contrib
           pip install .
 
-      - name: Locate OpenSSL runtime DLLs
+      - name: Locate Qt-compatible OpenSSL runtime DLLs
         shell: pwsh
         run: |
-          Write-Host "PythonLocation: $env:PythonLocation"
-          $patterns = @('libssl-3*.dll', 'libcrypto-3*.dll')
-          $candidateRoots = @(
+          $patternsPreferred = @('libssl-3-x64.dll','libcrypto-3-x64.dll')
+          $patternsFallback  = @('libssl-3*.dll','libcrypto-3*.dll')
+
+          $roots = @(
             "$env:PythonLocation",
             "$env:PythonLocation\DLLs",
             "$env:PythonLocation\bin"
           ) | Where-Object { $_ -and (Test-Path $_) }
 
           $found = @()
-          foreach ($root in $candidateRoots) {
-            foreach ($pattern in $patterns) {
-              $found += Get-ChildItem -Path $root -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue
+          foreach ($root in $roots) {
+            foreach ($p in $patternsPreferred) {
+              $found += Get-ChildItem -Path $root -Filter $p -Recurse -File -ErrorAction SilentlyContinue
             }
           }
 
-          $unique = $found | Sort-Object FullName -Unique
-          if ($unique.Count -ge 2) {
-            $envLines = @("OPENSSL_DLL_LIST<<EOF")
-            $envLines += ($unique | ForEach-Object { $_.FullName })
-            $envLines += "EOF"
-            $envLines | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            Write-Host "Located OpenSSL DLLs:"
-            $unique | Select-Object Name, FullName | Format-Table -AutoSize | Out-String | Write-Host
+          if (($found | Measure-Object).Count -lt 2) {
+            Write-Host "Preferred -x64 names not found under Python; will install OpenSSL."
           } else {
-            Write-Host "OpenSSL DLLs not found under PythonLocation roots."
+            $list = ($found | Select-Object -Expand FullName | Sort-Object -Unique) -join "`n"
+            "OPENSSL_DLL_LIST<<EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+            $list | Out-File -FilePath $env:GITHUB_ENV -Append
+            "EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+            Write-Host "Found Qt-compatible OpenSSL DLLs:"
+            $found | Select-Object Name, FullName
           }
 
-      - name: Install OpenSSL fallback
+      - name: Install OpenSSL (Shining-Light) if needed
         if: env.OPENSSL_DLL_LIST == ''
         shell: pwsh
         run: |
           choco install -y openssl-light
           $bin = 'C:\Program Files\OpenSSL-Win64\bin'
-          if (-not (Test-Path $bin)) {
-            throw "OpenSSL installed but directory not found: $bin"
-          }
-          $patterns = @('libssl-3*.dll', 'libcrypto-3*.dll')
-          $found = @()
-          foreach ($pattern in $patterns) {
-            $found += Get-ChildItem -Path $bin -Filter $pattern -File -Recurse -ErrorAction SilentlyContinue
-          }
-          $unique = $found | Sort-Object FullName -Unique
-          if ($unique.Count -lt 2) {
-            throw "OpenSSL fallback did not provide both libssl and libcrypto DLLs"
-          }
-          $envLines = @("OPENSSL_DLL_LIST<<EOF")
-          $envLines += ($unique | ForEach-Object { $_.FullName })
-          $envLines += "EOF"
-          $envLines | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          if (-not (Test-Path $bin)) { throw "OpenSSL installed but $bin not found" }
+
+          $need = @('libssl-3-x64.dll','libcrypto-3-x64.dll')
+          $found = foreach ($p in $need) { Get-ChildItem -Path $bin -Filter $p -File -ErrorAction Stop }
+
+          $list = ($found | Select-Object -Expand FullName | Sort-Object -Unique) -join "`n"
+          "OPENSSL_DLL_LIST<<EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $list | Out-File -FilePath $env:GITHUB_ENV -Append
+          "EOF" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "Bundling these OpenSSL DLLs from Shining-Light:"
+          $found | Select-Object Name, FullName
 
       - name: Validate OpenSSL DLL list
         shell: pwsh
