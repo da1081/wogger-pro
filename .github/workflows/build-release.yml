@@ -65,7 +65,7 @@ jobs:
           
           # Use PyInstaller's archive_viewer indirectly via strings search
           # Look for common OpenSSL library names in the exe
-          $content = Get-Content $exePath -Raw -Encoding Byte
+          $content = Get-Content $exePath -AsByteStream -Raw
           $strings = [System.Text.Encoding]::ASCII.GetString($content)
           
           $openssl_patterns = @('libssl', 'libcrypto', 'ssleay', 'libeay', 'openssl')
@@ -79,7 +79,7 @@ jobs:
           }
           
           if (-not $found) {
-            Write-Host "✓ No OpenSSL DLL references found in executable"
+            Write-Host "No OpenSSL DLL references found in executable"
           }
 
       - name: Upload EXE as an Artifact
