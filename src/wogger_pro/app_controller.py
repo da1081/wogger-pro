@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -36,17 +37,38 @@ LOGGER = logging.getLogger("wogger.app")
 
 class ApplicationController:
     def __init__(self, app: QApplication) -> None:
+        # Log SSL backend info early to diagnose Schannel vs OpenSSL issues
+        # Note: This happens BEFORE configure_logging(), so we use basic logging
+        
+        # Create a basic logger that works before configure_logging()
+        early_logger = logging.getLogger("wogger.ssl.init")
+        if not early_logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter('%(levelname)s %(name)s: %(message)s'))
+            early_logger.addHandler(handler)
+            early_logger.setLevel(logging.INFO)
+        
+        early_logger.info("=" * 70)
+        early_logger.info("SSL BACKEND DIAGNOSTIC")
+        early_logger.info("Environment QT_SSL_BACKEND=%s", os.environ.get('QT_SSL_BACKEND', 'NOT SET'))
+        early_logger.info("Environment QT_SSL_USE_SCHANNEL=%s", os.environ.get('QT_SSL_USE_SCHANNEL', 'NOT SET'))
+        early_logger.info("Environment QT_SSL_USE_OPENSSL=%s", os.environ.get('QT_SSL_USE_OPENSSL', 'NOT SET'))
+        early_logger.info("Available backends: %s", list(QSslSocket.availableBackends()))
+        early_logger.info("Active backend BEFORE setActiveBackend: %s", QSslSocket.activeBackend())
+        early_logger.info("Supports SSL: %s", QSslSocket.supportsSsl())
+        
         try:
             QSslSocket.setActiveBackend("schannel")
-        except Exception:
-            LOGGER.warning("Failed to activate Schannel TLS backend", exc_info=True)
-        else:
-            LOGGER.info(
-                "Qt TLS: available=%s active=%s supportsSsl=%s",
-                list(QSslSocket.availableBackends()),
-                QSslSocket.activeBackend(),
-                QSslSocket.supportsSsl(),
-            )
+            early_logger.info("setActiveBackend('schannel') succeeded")
+            early_logger.info("Active backend AFTER setActiveBackend: %s", QSslSocket.activeBackend())
+        except Exception as e:
+            early_logger.error("setActiveBackend('schannel') FAILED: %s", e, exc_info=True)
+            early_logger.error("Active backend remains: %s", QSslSocket.activeBackend())
+        
+        early_logger.info("SSL Library Build Version: %s", QSslSocket.sslLibraryBuildVersionString())
+        early_logger.info("SSL Library Runtime Version: %s", QSslSocket.sslLibraryVersionString())
+        early_logger.info("=" * 70)
+        
         self._app = app
         self._startup_aborted = False
         self._scheduler: PromptScheduler | None = None

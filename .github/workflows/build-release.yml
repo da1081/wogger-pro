@@ -41,11 +41,46 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pyinstaller-hooks-contrib
           pip install .
+      
+      - name: Pre-Build Check - List PySide6 TLS Plugins
+        shell: pwsh
+        run: |
+          Write-Host "Checking PySide6 TLS plugins..."
+          python -c "import PySide6; from pathlib import Path; tls_dir = Path(PySide6.__file__).parent / 'Qt' / 'plugins' / 'tls'; print('TLS Plugins:'); [print(f'  - {p.name}') for p in (tls_dir.glob('*.dll') if tls_dir.exists() else [])]"
+          
+          Write-Host "`nChecking PySide6 for bundled OpenSSL DLLs..."
+          python -c "import PySide6; from pathlib import Path; pyside_dir = Path(PySide6.__file__).parent; openssl_dlls = list(pyside_dir.rglob('*ssl*.dll')) + list(pyside_dir.rglob('*crypto*.dll')); print(f'Found {len(openssl_dlls)} OpenSSL DLLs'); [print(f'  - {p}') for p in openssl_dlls[:5]]"
 
       - name: Build EXE using PyInstaller
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean wogger_pro.spec
+
+      - name: Verify No OpenSSL DLLs Bundled
+        shell: pwsh
+        run: |
+          # Extract and inspect bundled files to ensure no OpenSSL DLLs
+          $exePath = "dist\wogger-pro.exe"
+          Write-Host "Checking for OpenSSL DLLs in build artifacts..."
+          
+          # Use PyInstaller's archive_viewer indirectly via strings search
+          # Look for common OpenSSL library names in the exe
+          $content = Get-Content $exePath -Raw -Encoding Byte
+          $strings = [System.Text.Encoding]::ASCII.GetString($content)
+          
+          $openssl_patterns = @('libssl', 'libcrypto', 'ssleay', 'libeay', 'openssl')
+          $found = $false
+          
+          foreach ($pattern in $openssl_patterns) {
+            if ($strings -match $pattern) {
+              Write-Warning "Found potential OpenSSL reference: $pattern"
+              $found = $true
+            }
+          }
+          
+          if (-not $found) {
+            Write-Host "✓ No OpenSSL DLL references found in executable"
+          }
 
       - name: Upload EXE as an Artifact
         uses: actions/upload-artifact@v4

@@ -5,6 +5,10 @@ from __future__ import annotations
 import pathlib
 import sys
 
+# Note: Schannel TLS backend is forced in pyi_force_schannel.py runtime hook.
+# Environment variables must be set BEFORE Qt imports, which happens at the
+# PyInstaller bootloader stage, not here in application code.
+
 if __package__ in (None, ""):
     # When executed as a script (e.g., via PyInstaller), ensure the project
     # root is on sys.path so absolute imports resolve correctly.
