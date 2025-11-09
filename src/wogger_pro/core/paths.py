@@ -21,6 +21,7 @@ APP_ICON_FILENAME = "wogger.ico"
 ALERT_SOUND_FILENAME = "wogger.wav"
 CATEGORIES_FILENAME = "categories.json"
 IGNORED_MISSING_TIMESLOTS_FILENAME = "ignored-missing-timeslots.json"
+FEATURES_FILENAME = "features.json"
 DATA_POINTER_FILENAME = f"{APP_NAME}-data-dir.json"
 
 _DATA_DIR_OVERRIDE: Path | None = None
@@ -212,3 +213,7 @@ def categories_path() -> Path:
 
 def ignored_missing_timeslots_path() -> Path:
     return app_data_dir() / IGNORED_MISSING_TIMESLOTS_FILENAME
+
+
+def features_path() -> Path:
+    return app_data_dir() / FEATURES_FILENAME

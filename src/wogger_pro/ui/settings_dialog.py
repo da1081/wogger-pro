@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
+from typing import Sequence
 
 from PySide6.QtCore import QSize, QUrl, Qt  # type: ignore[import]
 from PySide6.QtGui import QDesktopServices  # type: ignore[import]
@@ -31,9 +33,12 @@ from ..core.backup import create_appdata_backup
 from ..core.categories import CategoryManager
 from ..core.exceptions import BackupError, SettingsError
 from ..core.paths import default_app_data_dir, default_downloads_dir, recurring_backups_dir
+from ..core.models import Entry
+from ..core.exporter import create_jf_excel_export
 from ..core.prompt_manager import PromptManager
 from ..core.repository import EntriesRepository
 from ..core.settings import DEFAULT_PROMPT_CRON, Settings, Theme
+from .advanced_export_dialog import AdvancedExportDialog
 from .categories_dialog import CategoriesDialog
 from .csv_import_dialog import CsvImportDialog
 from .jf_loggr_import_dialog import JfLoggrImportDialog
@@ -253,6 +258,52 @@ class SettingsDialog(QDialog):
 
         layout.addRow("Data import", import_widget)
 
+        export_widget = QWidget(self)
+        export_layout = QVBoxLayout(export_widget)
+        export_layout.setContentsMargins(0, 0, 0, 0)
+        export_layout.setSpacing(6)
+
+        advanced_row = QWidget(export_widget)
+        advanced_layout = QHBoxLayout(advanced_row)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(8)
+
+        self._advanced_export_button = QPushButton("Open advanced export…", self)
+        self._advanced_export_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self._advanced_export_button.setToolTip("Configure and export grouped summaries")
+        self._advanced_export_button.clicked.connect(self._on_advanced_export_clicked)
+        advanced_layout.addWidget(self._advanced_export_button)
+        advanced_layout.addStretch(1)
+        export_layout.addWidget(advanced_row)
+
+        jf_excel_row = QWidget(export_widget)
+        jf_excel_layout = QHBoxLayout(jf_excel_row)
+        jf_excel_layout.setContentsMargins(0, 0, 0, 0)
+        jf_excel_layout.setSpacing(8)
+
+        self._jf_excel_export_button = QPushButton("Export to JF Excel…", self)
+        self._jf_excel_export_button.setIcon(self.style().standardIcon(QStyle.SP_FileIcon))
+        self._jf_excel_export_button.setToolTip("Export categories to an Excel tree grouped by date")
+        self._jf_excel_export_button.clicked.connect(self._on_export_jf_excel_clicked)
+        jf_excel_layout.addWidget(self._jf_excel_export_button)
+        jf_excel_layout.addStretch(1)
+        export_layout.addWidget(jf_excel_row)
+
+        jf_export_row = QWidget(export_widget)
+        jf_export_layout = QHBoxLayout(jf_export_row)
+        jf_export_layout.setContentsMargins(0, 0, 0, 0)
+        jf_export_layout.setSpacing(8)
+
+        self._jf_loggr_export_button = QPushButton("Export to JF LoggR…", self)
+        self._jf_loggr_export_button.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
+        self._jf_loggr_export_button.setToolTip("Create a JF LoggR-compatible work-logger.json export")
+        self._jf_loggr_export_button.clicked.connect(self._on_export_jf_loggr_clicked)
+        jf_export_layout.addWidget(self._jf_loggr_export_button)
+        jf_export_layout.addStretch(1)
+        export_layout.addWidget(jf_export_row)
+
+        layout.addRow("Data export", export_widget)
+
         categories_widget = QWidget(self)
         categories_layout = QHBoxLayout(categories_widget)
         categories_layout.setContentsMargins(0, 0, 0, 0)
@@ -461,6 +512,140 @@ class SettingsDialog(QDialog):
         if result == QDialog.DialogCode.Accepted:
             self._clear_error()
 
+    def _on_advanced_export_clicked(self) -> None:
+        try:
+            entries = self._repository.get_all_entries()
+        except Exception as exc:  # pragma: no cover - repository failures are environment specific
+            LOGGER.exception("Unable to load entries for advanced export")
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        if not entries:
+            QMessageBox.information(self, "No entries", "There are no entries available to export yet.")
+            return
+
+        dialog = AdvancedExportDialog(entries, parent=self)
+        try:
+            dialog.exec()
+        except Exception as exc:  # pragma: no cover - Qt dialog errors are user specific
+            LOGGER.exception("Advanced export dialog failed")
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+        self._clear_error()
+
+    def _on_export_jf_excel_clicked(self) -> None:
+        try:
+            entries = self._repository.get_all_entries()
+        except Exception as exc:  # pragma: no cover - repository failures are environment specific
+            LOGGER.exception("Unable to load entries for JF Excel export")
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        if not entries:
+            QMessageBox.information(self, "No entries", "There are no entries available to export yet.")
+            return
+
+        try:
+            categories = self._category_manager.list_categories()
+        except Exception as exc:  # pragma: no cover - category retrieval issues are environment specific
+            LOGGER.exception("Unable to load categories for JF Excel export")
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        default_path = Path(default_downloads_dir()) / "jf.xlsx"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save JF Excel export",
+            str(default_path),
+            "Excel Workbook (*.xlsx);;All Files (*.*)",
+            "Excel Workbook (*.xlsx)",
+        )
+        if not file_path:
+            return
+
+        target_path = Path(file_path).expanduser()
+        if target_path.suffix.lower() != ".xlsx":
+            target_path = target_path.with_suffix(".xlsx")
+
+        try:
+            create_jf_excel_export(entries, categories, target_path)
+        except Exception as exc:  # pragma: no cover - filesystem/environment dependent
+            LOGGER.exception("JF Excel export failed")
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        LOGGER.info(
+            "JF Excel export created",
+            extra={
+                "event": "ui_export_jf_excel",
+                "path": str(target_path),
+                "entries": len(entries),
+                "categories": len(categories),
+            },
+        )
+
+        QMessageBox.information(
+            self,
+            "Export complete",
+            f"Exported category summary workbook to:\n{target_path}",
+        )
+        self._clear_error()
+
+    def _on_export_jf_loggr_clicked(self) -> None:
+        entries = self._repository.get_all_entries()
+        if not entries:
+            QMessageBox.information(self, "Nothing to export", "There are no entries available to export yet.")
+            return
+
+        default_path = Path(default_downloads_dir()) / "work-logger.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export JF LoggR data",
+            str(default_path),
+            "JF LoggR export (work-logger.json);;JSON Files (*.json);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+
+        target_path = Path(file_path).expanduser()
+        if not target_path.suffix:
+            target_path = target_path.with_suffix(".json")
+
+        payload = self._build_jf_loggr_export_payload(entries)
+
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with target_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+        except Exception as exc:  # pragma: no cover - filesystem/environment dependent
+            LOGGER.exception("JF LoggR export failed")
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
+
+        entry_count = len(payload["entries"])
+        total_minutes = sum(entry.minutes for entry in entries)
+
+        LOGGER.info(
+            "JF LoggR export created",
+            extra={
+                "event": "ui_export_jf_loggr",
+                "entries": entry_count,
+                "minutes": total_minutes,
+                "path": str(target_path),
+            },
+        )
+
+        QMessageBox.information(
+            self,
+            "Export complete",
+            (
+                f"Exported {entry_count} segment{'s' if entry_count != 1 else ''} "
+                f"({total_minutes} minute{'s' if total_minutes != 1 else ''}) to:\n{target_path}"
+            ),
+        )
+        self._clear_error()
+
     def _on_categories_clicked(self) -> None:
         dialog = CategoriesDialog(
             self._category_manager,
@@ -581,6 +766,20 @@ class SettingsDialog(QDialog):
 
     def _clear_error(self) -> None:
         self._error_label.clear()
+
+    def _build_jf_loggr_export_payload(self, entries: Sequence[Entry]) -> dict[str, object]:
+        items: list[dict[str, object]] = []
+        for entry in sorted(entries, key=lambda e: (e.segment_start, e.segment_end, e.task.lower())):
+            item: dict[str, object] = {
+                "day": entry.segment_start.strftime("%Y-%m-%d"),
+                "start": entry.segment_start.strftime("%H:%M"),
+                "end": entry.segment_end.strftime("%H:%M"),
+                "description": entry.task,
+            }
+            if entry.category:
+                item["category"] = entry.category
+            items.append(item)
+        return {"entries": items}
 
     def _on_open_appdata_clicked(self) -> None:
         path_text = self._app_data_edit.text().strip()

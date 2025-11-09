@@ -142,7 +142,6 @@ class CategoryTreePicker(QWidget):
                 continue
             seen.add(key)
             sanitized.append(normalized)
-        sanitized.sort(key=lambda item: item.lower())
         self._categories = sanitized
 
         previous = self._current_category

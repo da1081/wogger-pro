@@ -132,6 +132,14 @@ class CategoriesDialog(QDialog):
         self._rename_button.clicked.connect(self._on_rename_clicked)
         row_layout.addWidget(self._rename_button)
 
+        self._move_up_button = QPushButton("Move Up", button_row)
+        self._move_up_button.clicked.connect(lambda: self._on_move_category(-1))
+        row_layout.addWidget(self._move_up_button)
+
+        self._move_down_button = QPushButton("Move Down", button_row)
+        self._move_down_button.clicked.connect(lambda: self._on_move_category(1))
+        row_layout.addWidget(self._move_down_button)
+
         self._delete_button = QPushButton("Delete…", button_row)
         self._delete_button.clicked.connect(self._on_delete_clicked)
         row_layout.addWidget(self._delete_button)
@@ -509,6 +517,34 @@ class CategoriesDialog(QDialog):
         self._refresh_list()
         self._notify_entries_updated()
 
+    def _on_move_category(self, delta: int) -> None:
+        row = self._current_row()
+        if row is None or not row.managed:
+            return
+
+        order = self._category_manager.list_categories()
+        try:
+            index = next(i for i, name in enumerate(order) if name.lower() == row.name.lower())
+        except StopIteration:
+            return
+
+        target_index = index + delta
+        if target_index < 0 or target_index >= len(order):
+            return
+
+        reordered = list(order)
+        item = reordered.pop(index)
+        reordered.insert(target_index, item)
+
+        try:
+            self._category_manager.reorder_categories(reordered)
+        except (ValueError, PersistenceError) as exc:
+            QMessageBox.critical(self, "Unable to reorder categories", str(exc))
+            return
+
+        self._status_label.setText("Category order updated.")
+        self._refresh_list()
+
     def _on_bulk_edit_clicked(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Bulk Edit Categories")
@@ -546,9 +582,18 @@ class CategoriesDialog(QDialog):
 
         new_names = self._normalize_bulk_lines(editor.toPlainText())
 
+        previous_order = self._category_manager.list_categories()
+        previous_order_cf = [name.casefold() for name in previous_order]
+        previous_keys = set(previous_order_cf)
+
         existing_map = {row.name.casefold(): row for row in self._rows}
         existing_keys = set(existing_map.keys())
         new_keys = {name.casefold() for name in new_names}
+
+        desired_existing_order = [name for name in new_names if name.casefold() in previous_keys]
+        order_change_requested = (
+            [name.casefold() for name in desired_existing_order] != previous_order_cf
+        )
 
         to_remove = [existing_map[key] for key in existing_keys - new_keys]
 
@@ -562,7 +607,7 @@ class CategoriesDialog(QDialog):
                     to_add.append(name)
                     added_lower.add(key)
 
-        if not to_add and not to_remove:
+        if not to_add and not to_remove and not order_change_requested:
             self._status_label.setText("Bulk edit made no changes.")
             return
 
@@ -621,6 +666,22 @@ class CategoriesDialog(QDialog):
                     self._refresh_list()
                     return
 
+        try:
+            current_after = self._category_manager.list_categories()
+            current_keys = {name.casefold() for name in current_after}
+            desired_final = [name for name in new_names if name.casefold() in current_keys]
+            if current_after or desired_final:
+                self._category_manager.reorder_categories(desired_final)
+            final_order = self._category_manager.list_categories()
+        except (ValueError, PersistenceError) as exc:
+            QMessageBox.critical(self, "Unable to finalize category order", str(exc))
+            self._refresh_list()
+            return
+
+        order_changed_final = (
+            [name.casefold() for name in final_order] != previous_order_cf
+        )
+
         self._refresh_list()
         if to_add:
             self._select_category(to_add[0])
@@ -640,6 +701,8 @@ class CategoriesDialog(QDialog):
             summary_parts.append(
                 f"cleared {cleared_entries} {'entry' if cleared_entries == 1 else 'entries'}"
             )
+        if order_changed_final:
+            summary_parts.append("updated category order")
 
         self._status_label.setText(
             "Bulk edit applied: " + ", ".join(summary_parts) + "."
@@ -676,6 +739,20 @@ class CategoriesDialog(QDialog):
         has_selection = row is not None
         self._rename_button.setEnabled(has_selection)
         self._delete_button.setEnabled(has_selection)
+        can_move = has_selection and row is not None and row.managed
+        if can_move:
+            order = [managed.name for managed in self._rows if managed.managed]
+            try:
+                index = next(
+                    idx for idx, name in enumerate(order) if name.lower() == row.name.lower()
+                )
+            except StopIteration:
+                index = -1
+            self._move_up_button.setEnabled(index > 0)
+            self._move_down_button.setEnabled(0 <= index < len(order) - 1)
+        else:
+            self._move_up_button.setEnabled(False)
+            self._move_down_button.setEnabled(False)
 
     def _notify_entries_updated(self) -> None:
         if self._entries_updated_callback is None:
@@ -686,8 +763,19 @@ class CategoriesDialog(QDialog):
             LOGGER.exception("Entries updated callback failed")
 
     def _bulk_editor_initial_lines(self) -> list[str]:
-        names = sorted({row.name for row in self._rows}, key=str.casefold)
-        return names
+        managed = [row.name for row in self._rows if row.managed]
+        seen = {name.casefold() for name in managed}
+        unmanaged: list[str] = []
+        for row in self._rows:
+            if row.managed:
+                continue
+            key = row.name.casefold()
+            if key in seen:
+                continue
+            unmanaged.append(row.name)
+            seen.add(key)
+        unmanaged.sort(key=str.casefold)
+        return managed + unmanaged
 
     def _normalize_bulk_lines(self, text: str) -> list[str]:
         names: list[str] = []

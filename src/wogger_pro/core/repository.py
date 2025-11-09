@@ -12,9 +12,9 @@ from typing import Iterable, Optional, Sequence
 
 import portalocker
 
-from .exceptions import BackupError, PersistenceError
+from .exceptions import BackupError, PersistenceError, SegmentConflictError
 from .models import Entry
-from .time_segments import TimeRange
+from .time_segments import TimeRange, minutes_between
 from .paths import backups_dir, entries_path
 
 
@@ -151,6 +151,133 @@ class EntriesRepository:
             if entry.as_range().overlaps(base):
                 overlapping.append(entry)
         return overlapping
+
+    def update_entry(
+        self,
+        entry_id: str,
+        *,
+        task: str,
+        segment_start: datetime,
+        segment_end: datetime,
+        category: str | None = None,
+    ) -> Entry:
+        normalized_task = task.strip()
+        if not normalized_task:
+            raise ValueError("Task name must be non-empty")
+        if segment_end <= segment_start:
+            raise ValueError("Segment end must be after start")
+
+        normalized_category = category.strip() if isinstance(category, str) and category.strip() else None
+        duration_minutes = minutes_between(segment_start, segment_end)
+        if duration_minutes < 1:
+            raise ValueError("Segment duration must be at least one minute")
+
+        try:
+            with portalocker.Lock(
+                self._path,
+                mode="r+",
+                timeout=self._lock_timeout,
+                flags=portalocker.LockFlags.EXCLUSIVE,
+                encoding="utf-8",
+            ) as locked_file:
+                locked_file.seek(0)
+                lines = [line.rstrip("\n") for line in locked_file if line.strip()]
+                entries = self._deserialize_entries(lines)
+
+                target: Entry | None = None
+                for entry in entries:
+                    if entry.entry_id == entry_id:
+                        target = entry
+                        break
+
+                if target is None:
+                    raise PersistenceError("Entry not found")
+
+                proposed_range = TimeRange(start=segment_start, end=segment_end)
+                for entry in entries:
+                    if entry.entry_id == entry_id:
+                        continue
+                    if proposed_range.overlaps(entry.as_range()):
+                        raise SegmentConflictError(
+                            "The selected time range overlaps another entry."
+                        )
+
+                target.task = normalized_task
+                target.segment_start = segment_start
+                target.segment_end = segment_end
+                target.minutes = duration_minutes
+                target.category = normalized_category
+
+                locked_file.seek(0)
+                locked_file.truncate()
+                for entry in entries:
+                    serialized = json.dumps(entry.to_json_dict(), separators=(",", ":"))
+                    locked_file.write(serialized)
+                    locked_file.write("\n")
+                locked_file.flush()
+                os.fsync(locked_file.fileno())
+        except (PersistenceError, SegmentConflictError, ValueError):
+            raise
+        except Exception as exc:
+            self._logger.exception(
+                "Failed to update entry",
+                extra={"event": "entries_update_failed", "entry_id": entry_id},
+            )
+            raise PersistenceError("Unable to update entry") from exc
+
+        self._logger.info(
+            "Entry updated",
+            extra={
+                "event": "entries_update_one",
+                "entry_id": entry_id,
+                "task": normalized_task,
+                "start": segment_start.isoformat(),
+                "end": segment_end.isoformat(),
+                "minutes": duration_minutes,
+                "category": normalized_category or "",
+            },
+        )
+        return target
+
+    def delete_entry(self, entry_id: str) -> bool:
+        try:
+            with portalocker.Lock(
+                self._path,
+                mode="r+",
+                timeout=self._lock_timeout,
+                flags=portalocker.LockFlags.EXCLUSIVE,
+                encoding="utf-8",
+            ) as locked_file:
+                locked_file.seek(0)
+                lines = [line.rstrip("\n") for line in locked_file if line.strip()]
+                entries = self._deserialize_entries(lines)
+
+                original_count = len(entries)
+                entries = [entry for entry in entries if entry.entry_id != entry_id]
+
+                if len(entries) == original_count:
+                    return False
+
+                locked_file.seek(0)
+                locked_file.truncate()
+                for entry in entries:
+                    serialized = json.dumps(entry.to_json_dict(), separators=(",", ":"))
+                    locked_file.write(serialized)
+                    locked_file.write("\n")
+                locked_file.flush()
+                os.fsync(locked_file.fileno())
+        except Exception as exc:
+            self._logger.exception(
+                "Failed to delete entry",
+                extra={"event": "entries_delete_failed", "entry_id": entry_id},
+            )
+            raise PersistenceError("Unable to delete entry") from exc
+
+        self._logger.info(
+            "Entry deleted",
+            extra={"event": "entries_delete_one", "entry_id": entry_id},
+        )
+        return True
 
     def list_tasks_with_counts(self) -> list[tuple[str, int]]:
         entries = self.get_all_entries()

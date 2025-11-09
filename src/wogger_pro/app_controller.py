@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QDialog, QApplication, QMessageBox  # type: ignore
 
 from .core.category_consistency import analyze_category_consistency
 from .core.categories import CategoryManager
+from .core.features import FeatureService
 from .core.exception_logging import install_global_exception_logger
 from .core.exceptions import PersistenceError, SettingsError
 from .core.logging_config import configure_logging, reset_logging
@@ -55,6 +56,7 @@ class ApplicationController:
         self._main_window: MainWindow | None = None
         self._repository: EntriesRepository | None = None
         self._theme_manager: ThemeManager | None = None
+        self._feature_service: FeatureService | None = None
         self._settings_manager = SettingsManager()
         try:
             self._settings = self._settings_manager.load()
@@ -65,6 +67,7 @@ class ApplicationController:
 
         set_app_data_directory(Path(self._settings.app_data_path).expanduser())
         ensure_app_structure()
+        self._feature_service = FeatureService()
         configure_logging()
         install_global_exception_logger()
         install_qt_message_handler()
@@ -86,11 +89,13 @@ class ApplicationController:
         self._sound_player.set_enabled(self._settings.prompt_sounds_enabled)
         self._prompt_service = PromptService(self._prompt_manager, self._sound_player)
 
+        assert self._feature_service is not None
         self._main_window = MainWindow(
             self._repository,
             self._prompt_manager,
             self._prompt_service,
             self._settings,
+            self._feature_service,
         )
         self._apply_window_icon()
         self._connect_signals()
@@ -263,6 +268,8 @@ class ApplicationController:
 
         set_app_data_directory(new_resolved)
         ensure_app_structure()
+        if self._feature_service is not None:
+            self._feature_service.reload()
         configure_logging()
 
         self._repository = EntriesRepository()

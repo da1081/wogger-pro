@@ -34,9 +34,7 @@ class CategoryManager:
 
     # ------------------------------------------------------------------
     def list_categories(self) -> list[str]:
-        categories = self._load()
-        categories.sort(key=lambda value: value.lower())
-        return categories
+        return self._load()
 
     def add_category(self, name: str) -> None:
         normalized = _normalize(name)
@@ -75,6 +73,29 @@ class CategoryManager:
             return
         self._save(filtered)
 
+    def reorder_categories(self, new_order: Iterable[str]) -> None:
+        desired: list[str] = []
+        seen: set[str] = set()
+        for value in new_order:
+            normalized = _normalize(value)
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                raise ValueError("Category order contains duplicates")
+            desired.append(normalized)
+            seen.add(key)
+
+        current = self._load()
+        current_keys = {item.lower() for item in current}
+        desired_keys = {item.lower() for item in desired}
+        if current_keys != desired_keys:
+            raise ValueError("Category order does not match existing categories")
+
+        lookup = {item.lower(): item for item in current}
+        ordered = [lookup[item.lower()] for item in desired]
+        self._save(ordered)
+
     # ------------------------------------------------------------------
     def _load(self) -> list[str]:
         try:
@@ -97,10 +118,32 @@ class CategoryManager:
             self._logger.exception("Unable to read categories file")
             raise PersistenceError("Unable to read categories") from exc
 
-        return [_normalize(item) for item in data if _normalize(item)]
+        sanitized: list[str] = []
+        seen: set[str] = set()
+        items = data if isinstance(data, list) else []
+        for item in items:
+            normalized = _normalize(item)
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            sanitized.append(normalized)
+        return sanitized
 
     def _save(self, categories: Iterable[str]) -> None:
-        ordered = sorted({_normalize(item) for item in categories if _normalize(item)}, key=lambda value: value.lower())
+        sequence: list[str] = []
+        seen: set[str] = set()
+        for item in categories:
+            normalized = _normalize(item)
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            sequence.append(normalized)
         try:
             with portalocker.Lock(
                 self._path,
@@ -109,7 +152,7 @@ class CategoryManager:
                 flags=portalocker.LockFlags.EXCLUSIVE,
                 encoding="utf-8",
             ) as locked_file:
-                json.dump(list(ordered), locked_file, ensure_ascii=False, indent=2)
+                json.dump(sequence, locked_file, ensure_ascii=False, indent=2)
                 locked_file.flush()
         except Exception as exc:
             self._logger.exception("Unable to save categories file")

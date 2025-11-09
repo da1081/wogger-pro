@@ -13,11 +13,12 @@ from functools import partial
 from importlib import metadata
 from typing import Optional, Callable, Sequence
 
-from PySide6.QtCore import Qt, Signal, QSize, QTimer, QModelIndex, QUrl
+from PySide6.QtCore import Qt, Signal, QSize, QTimer, QModelIndex, QUrl, QEvent
 from PySide6.QtGui import QPalette, QDesktopServices
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QButtonGroup,
     QFrame,
     QHeaderView,
@@ -32,6 +33,8 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QDialog,
     QStyledItemDelegate,
+    QStyle,
+    QStyleOptionButton,
     QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -41,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from ..core.categories import CategoryManager
 from ..core.exceptions import PersistenceError
-from ..core.features import DISABLE_UPDATE_CHECK
+from ..core.features import FeatureService
 from ..core.models import Entry, TaskSummary
 from ..core.missing_timeslots import MissingTimeslot, MissingTimeslotStore, detect_missing_timeslots
 from ..core.prompt_manager import PromptManager
@@ -61,6 +64,8 @@ from .category_picker import CATEGORY_PATH_SEPARATOR, CategoryTreePicker
 from .prompt_service import PromptService
 from .task_totals_model import TaskTotalsModel
 from .task_edit_dialog import TaskEditDialog
+from .entries_model import EntriesTableModel, EntryRow
+from .entry_edit_dialog import EntryEditDialog
 
 LOGGER = logging.getLogger("wogger.ui.main")
 
@@ -157,6 +162,40 @@ class CategoryDelegate(QStyledItemDelegate):
         editor.setGeometry(option.rect)
 
 
+class EntryDeleteDelegate(QStyledItemDelegate):
+    def __init__(
+        self,
+        delete_callback: Callable[[QModelIndex, bool], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._delete_callback = delete_callback
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        style = option.widget.style() if option.widget else QApplication.style()
+        button = QStyleOptionButton()
+        button.rect = option.rect.adjusted(6, 6, -6, -6)
+        button.text = "Delete"
+        button.state = QStyle.State_Enabled | QStyle.State_Raised
+        if option.state & QStyle.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        if option.state & QStyle.State_MouseOver:
+            button.state |= QStyle.State_MouseOver
+        style.drawControl(QStyle.CE_PushButton, button, painter)
+
+    def editorEvent(self, event, model, option, index):  # type: ignore[override]
+        if event.type() in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+            if event.button() != Qt.LeftButton:
+                return False
+            if not option.rect.contains(event.pos()):
+                return False
+            if event.type() == QEvent.MouseButtonRelease:
+                modifiers = QApplication.keyboardModifiers()
+                ctrl_pressed = bool(modifiers & Qt.ControlModifier)
+                self._delete_callback(index, ctrl_pressed)
+            return True
+        return False
+
 class MainWindow(QMainWindow):
     settings_requested = Signal()
     manual_entry_requested = Signal()
@@ -167,6 +206,7 @@ class MainWindow(QMainWindow):
         prompt_manager: PromptManager,
         prompt_service: PromptService,
         settings: Settings,
+        feature_service: FeatureService,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -181,6 +221,7 @@ class MainWindow(QMainWindow):
         self._prompt_service = prompt_service  # keep reference
         self._filter_state = FilterState(FilterMode.TODAY)
         self._settings = settings
+        self._feature_service: FeatureService = feature_service
 
         self._missing_store = MissingTimeslotStore()
         self._missing_panel: QWidget | None = None
@@ -192,8 +233,12 @@ class MainWindow(QMainWindow):
         self._category_manager = CategoryManager()
 
         self._model = TaskTotalsModel()
+        self._entries_model = EntriesTableModel()
         self._tabs: QTabWidget | None = None
         self._category_tree: QTreeWidget | None = None
+        self._entries_table: QTableView | None = None
+        self._entries_tab: QWidget | None = None
+        self._delete_delegate: EntryDeleteDelegate | None = None
         self._category_order_map: dict[tuple[str, ...], int] = {}
         self._category_order_fallback_base: int = 0
         self._category_order_names: dict[tuple[str, ...], str] = {}
@@ -280,10 +325,14 @@ class MainWindow(QMainWindow):
         categories_layout.setSpacing(0)
         categories_layout.addWidget(self._category_tree)
 
+        entries_tab = self._build_entries_tab()
+        self._entries_tab = entries_tab
+
         self._tabs = QTabWidget(self)
         self._tabs.setDocumentMode(True)
         self._tabs.addTab(tasks_tab, "Tasks")
         self._tabs.addTab(categories_tab, "Categories")
+        self._tabs.addTab(entries_tab, "Entries")
         layout.addWidget(self._tabs, 1)
         self._tabs.currentChanged.connect(self._apply_active_tab_style)
         self._apply_active_tab_style()
@@ -314,6 +363,44 @@ class MainWindow(QMainWindow):
             f"QTabBar::tab:selected, QTabBar::tab:hover {{ background-color: {highlight_bg.name()}; color: {highlight_fg.name()}; }}"
         )
         tab_bar.setStyleSheet(stylesheet)
+
+    def _build_entries_tab(self) -> QWidget:
+        tab = QWidget(self)
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self._entries_table = QTableView(tab)
+        self._entries_table.setObjectName("entriesTable")
+        self._entries_table.setModel(self._entries_model)
+        self._entries_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._entries_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._entries_table.setAlternatingRowColors(True)
+        self._entries_table.setTextElideMode(Qt.ElideRight)
+        self._entries_table.setWordWrap(True)
+        self._entries_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._entries_table.doubleClicked.connect(self._edit_selected_entry)
+
+        header = self._entries_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        vheader = self._entries_table.verticalHeader()
+        vheader.setVisible(False)
+        vheader.setSectionResizeMode(QHeaderView.ResizeToContents)
+
+        layout.addWidget(self._entries_table, 1)
+
+        self._delete_delegate = EntryDeleteDelegate(self._on_entry_delete_requested, parent=self._entries_table)
+        self._entries_table.setItemDelegateForColumn(6, self._delete_delegate)
+
+        return tab
 
     def _build_controls_bar(self) -> QWidget:
         container = QWidget(self)
@@ -435,7 +522,7 @@ class MainWindow(QMainWindow):
         self._prompt_manager.entries_replaced.connect(self._refresh_totals)
 
     def _check_for_updates(self) -> None:
-        if DISABLE_UPDATE_CHECK:
+        if self._feature_service.is_update_check_disabled():
             LOGGER.debug("Update check skipped (feature disabled)")
             if self._update_button is not None:
                 self._update_button.setVisible(False)
@@ -617,6 +704,7 @@ class MainWindow(QMainWindow):
             if not self._filter_state.start or not self._filter_state.end:
                 QMessageBox.warning(self, "Invalid range", "Please select a valid start and end time.")
                 self._latest_entries = []
+                self._refresh_entries_table([])
                 self._update_missing_timeslots([])
                 self._update_category_tree([])
                 return
@@ -624,6 +712,7 @@ class MainWindow(QMainWindow):
 
         entries = list(entries)
         self._latest_entries = entries
+        self._refresh_entries_table(entries)
         self._update_missing_timeslots(entries)
 
         summaries = self._build_summaries(entries)
@@ -633,6 +722,22 @@ class MainWindow(QMainWindow):
         self._update_status_bar()
         self._log_filter_change(len(entries))
         self._select_task(preserve_task)
+
+    def _refresh_entries_table(self, entries: list[Entry]) -> None:
+        selected_entry_id: str | None = None
+        if self._entries_table is not None:
+            selected_row = self._selected_entry_row()
+            if selected_row is not None:
+                selected_entry_id = selected_row.entry.entry_id
+
+        self._entries_model.update_entries(entries)
+
+        if self._entries_table is not None:
+            if selected_entry_id:
+                new_row = self._entries_model.row_index_for_entry(selected_entry_id)
+                if new_row is not None:
+                    self._entries_table.selectRow(new_row)
+            self._entries_table.resizeRowsToContents()
 
     def _build_summaries(self, entries: list[Entry]) -> list[TaskSummary]:
         totals: dict[str, int] = {}
@@ -1007,6 +1112,92 @@ class MainWindow(QMainWindow):
         status = self.statusBar()
         status.showMessage(f"Renamed '{summary.task}' to '{new_name}' ({updated} entries)", 5000)
         QTimer.singleShot(5100, self._update_status_bar)
+
+    def _selected_entry_row(self) -> EntryRow | None:
+        if self._entries_table is None:
+            return None
+        selection_model = self._entries_table.selectionModel()
+        if selection_model is None:
+            return None
+        selected_rows = selection_model.selectedRows()
+        if not selected_rows:
+            return None
+        return self._entries_model.entry_for_row(selected_rows[0].row())
+
+    def _on_entry_delete_requested(self, index: QModelIndex, skip_confirmation: bool) -> None:
+        entry_row = self._entries_model.entry_for_row(index.row())
+        if entry_row is None:
+            return
+        self._delete_entry(entry_row, skip_confirmation)
+
+    def _delete_entry(self, entry_row: EntryRow, skip_confirmation: bool) -> None:
+        if not skip_confirmation:
+            confirmation = QMessageBox.question(
+                self,
+                "Delete entry",
+                (
+                    "Delete this entry?\n\n"
+                    "This cannot be undone unless you have created a backup, "
+                    "which you can do from the Settings view."
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirmation != QMessageBox.StandardButton.Yes:
+                return
+
+        try:
+            deleted = self._repository.delete_entry(entry_row.entry.entry_id)
+        except PersistenceError as exc:
+            LOGGER.exception("Unable to delete entry", extra={"event": "entries_delete_failed"})
+            QMessageBox.critical(self, "Delete failed", str(exc))
+            return
+
+        if not deleted:
+            QMessageBox.warning(self, "Delete failed", "The selected entry could not be located.")
+            self._refresh_totals()
+            return
+
+        label = entry_row.entry.segment_start.strftime("%Y-%m-%d %H:%M")
+        self._refresh_totals()
+        self.statusBar().showMessage(
+            f"Deleted entry '{entry_row.entry.task}' starting {label}.",
+            5000,
+        )
+        QTimer.singleShot(5100, self._update_status_bar)
+
+    def _edit_selected_entry(self, index: QModelIndex | None = None) -> None:
+        entry_row: EntryRow | None = None
+        if index is not None and index.isValid():
+            entry_row = self._entries_model.entry_for_row(index.row())
+        if entry_row is None:
+            entry_row = self._selected_entry_row()
+        if entry_row is None:
+            return
+
+        dialog = EntryEditDialog(
+            entry_row.entry,
+            self._repository,
+            self._category_manager.list_categories(),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        updated_entry = dialog.updated_entry
+        self._refresh_totals()
+        if updated_entry is not None:
+            message = f"Updated entry '{updated_entry.task}' ({updated_entry.minutes} min)."
+        else:
+            message = "Entry updated."
+        self.statusBar().showMessage(message, 5000)
+        QTimer.singleShot(5100, self._update_status_bar)
+
+    def _delete_selected_entry(self) -> None:
+        entry_row = self._selected_entry_row()
+        if entry_row is None:
+            return
+        self._delete_entry(entry_row, skip_confirmation=False)
 
     def _handle_category_commit(
         self,
