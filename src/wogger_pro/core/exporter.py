@@ -95,12 +95,13 @@ def create_jf_excel_export(entries: Sequence[Entry], categories: Sequence[str], 
     if not entries:
         raise ValueError("No entries available to export")
 
-    normalized_categories = _collect_category_names(categories, entries)
+    ordering = _CategoryOrdering.from_categories(categories)
+    normalized_categories = _collect_category_names(categories, entries, ordering)
     minutes_lookup = _build_minutes_lookup(entries)
     date_buckets = _collect_date_buckets(entries)
 
-    tree_root = _build_category_tree(normalized_categories)
-    _ensure_uncategorized_node(tree_root, minutes_lookup)
+    tree_root = _build_category_tree(normalized_categories, ordering)
+    _ensure_uncategorized_node(tree_root, minutes_lookup, ordering)
     _assign_minutes(tree_root, minutes_lookup)
 
     _write_jf_excel_workbook(tree_root, date_buckets, path)
@@ -335,17 +336,82 @@ class _CategoryNode:
     minutes: dict[date, int] = field(default_factory=dict)
 
 
-def _collect_category_names(categories: Sequence[str], entries: Sequence[Entry]) -> list[str]:
-    collected: dict[str, str] = {}
-    for source in (categories, [entry.category for entry in entries]):
-        for value in source:
-            normalized = _normalize_category(value)
-            if not normalized:
+@dataclass
+class _CategoryOrdering:
+    index_by_path: dict[tuple[str, ...], int]
+    next_index: int
+
+    @classmethod
+    def from_categories(cls, categories: Sequence[str]) -> "_CategoryOrdering":
+        index_map: dict[tuple[str, ...], int] = {}
+        next_index = 0
+        for category in categories:
+            parts = _split_category_path(category)
+            if not parts:
                 continue
-            key = normalized.lower()
-            if key not in collected:
-                collected[key] = normalized
-    ordered = sorted(collected.values(), key=lambda item: item.lower())
+            path: list[str] = []
+            for part in parts:
+                path.append(part)
+                key = tuple(segment.lower() for segment in path)
+                if key not in index_map:
+                    index_map[key] = next_index
+                    next_index += 1
+        return cls(index_by_path=index_map, next_index=next_index)
+
+    def ensure(self, parts: Sequence[str]) -> int:
+        key = tuple(part.lower() for part in parts if part)
+        if not key:
+            return -1
+        existing = self.index_by_path.get(key)
+        if existing is not None:
+            return existing
+        index = self.next_index
+        self.index_by_path[key] = index
+        self.next_index += 1
+        return index
+
+    def order_for(self, parts: Sequence[str]) -> int:
+        return self.ensure(parts)
+
+
+def _split_category_path(category: str) -> list[str]:
+    return [segment.strip() for segment in category.split(CATEGORY_SEPARATOR) if segment.strip()]
+
+
+def _collect_category_names(
+    categories: Sequence[str],
+    entries: Sequence[Entry],
+    ordering: _CategoryOrdering,
+) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    for value in categories:
+        normalized = _normalize_category(value)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordering.ensure(_split_category_path(normalized))
+        ordered.append(normalized)
+
+    extras: set[str] = set()
+    for entry in entries:
+        normalized = _normalize_category(entry.category)
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        extras.add(normalized)
+
+    for value in sorted(extras, key=lambda item: item.lower()):
+        ordering.ensure(_split_category_path(value))
+        ordered.append(value)
+        seen.add(value.lower())
+
     return ordered
 
 
@@ -353,10 +419,10 @@ def _normalize_category(value: str | None) -> str:
     return (value or "").strip()
 
 
-def _build_category_tree(categories: Sequence[str]) -> _CategoryNode:
+def _build_category_tree(categories: Sequence[str], ordering: _CategoryOrdering) -> _CategoryNode:
     root = _CategoryNode(name="(root)", full_name=None, depth=0)
     for category in categories:
-        parts = [part.strip() for part in category.split(CATEGORY_SEPARATOR) if part.strip()]
+        parts = _split_category_path(category)
         if not parts:
             continue
         parent = root
@@ -364,13 +430,13 @@ def _build_category_tree(categories: Sequence[str]) -> _CategoryNode:
         for part in parts:
             path.append(part)
             full_name = CATEGORY_SEPARATOR.join(path)
+            ordering.ensure(path)
             child = _find_child(parent, part)
             if child is None:
                 child = _CategoryNode(name=part, full_name=full_name, depth=parent.depth + 1)
                 parent.children.append(child)
-                parent.children.sort(key=lambda node: node.name.lower())
             parent = child
-    root.children.sort(key=lambda node: node.name.lower())
+    _apply_ordering(root, ordering)
     return root
 
 
@@ -393,7 +459,11 @@ def _build_minutes_lookup(entries: Sequence[Entry]) -> dict[str, dict[date, int]
     return minutes_lookup
 
 
-def _ensure_uncategorized_node(root: _CategoryNode, minutes_lookup: dict[str, dict[date, int]]) -> None:
+def _ensure_uncategorized_node(
+    root: _CategoryNode,
+    minutes_lookup: dict[str, dict[date, int]],
+    ordering: _CategoryOrdering,
+) -> None:
     if UNCATEGORIZED_LABEL.lower() not in minutes_lookup:
         return
     existing = _find_child(root, UNCATEGORIZED_LABEL)
@@ -404,7 +474,8 @@ def _ensure_uncategorized_node(root: _CategoryNode, minutes_lookup: dict[str, di
             depth=1,
         )
         root.children.append(uncategorized)
-        root.children.sort(key=lambda node: node.name.lower())
+        ordering.ensure([UNCATEGORIZED_LABEL])
+        _apply_ordering(root, ordering)
 
 
 def _assign_minutes(node: _CategoryNode, minutes_lookup: dict[str, dict[date, int]]) -> None:
@@ -433,15 +504,21 @@ def _write_jf_excel_workbook(root: _CategoryNode, dates: Sequence[date], path: P
     sheet.append(date_row)
     sheet.freeze_panes = "B3"
 
-    for node in _iterate_nodes(root):
-        row = [_display_name(node)]
-        for day in dates:
-            minutes = node.minutes.get(day, 0)
-            row.append("" if minutes == 0 else minutes)
-        sheet.append(row)
-        category_cell = sheet.cell(row=sheet.max_row, column=1)
-        indent_level = max(0, node.depth - 1)
-        category_cell.alignment = Alignment(indent=indent_level)
+    total_nodes = 0
+    top_level_count = len(root.children)
+    for index, top_node in enumerate(root.children):
+        for node in _walk(top_node):
+            total_nodes += 1
+            row = [_display_name(node)]
+            for day in dates:
+                minutes = node.minutes.get(day, 0)
+                row.append("" if minutes == 0 else minutes)
+            sheet.append(row)
+            category_cell = sheet.cell(row=sheet.max_row, column=1)
+            indent_level = max(0, node.depth - 1)
+            category_cell.alignment = Alignment(indent=indent_level)
+        if index < top_level_count - 1:
+            sheet.append([""] * len(headers))
 
     sheet.column_dimensions[get_column_letter(1)].width = 48
     for column_index in range(2, len(headers) + 1):
@@ -449,19 +526,29 @@ def _write_jf_excel_workbook(root: _CategoryNode, dates: Sequence[date], path: P
 
     metadata = workbook.create_sheet("Metadata")
     metadata.append(["Generated", datetime.utcnow().isoformat(timespec="seconds") + "Z"])
-    metadata.append(["Categories", len(list(_iterate_nodes(root)))])
+    metadata.append(["Categories", total_nodes])
     metadata.append(["Date columns", len(dates)])
 
     workbook.save(path)
 
 
+def _apply_ordering(node: _CategoryNode, ordering: _CategoryOrdering) -> None:
+    if not node.children:
+        return
+    node.children.sort(key=lambda child: (_ordering_key(child, ordering), child.name.lower()))
+    for child in node.children:
+        _apply_ordering(child, ordering)
+
+
+def _ordering_key(node: _CategoryNode, ordering: _CategoryOrdering) -> int:
+    if not node.full_name:
+        return -1
+    parts = _split_category_path(node.full_name)
+    return ordering.order_for(parts)
+
+
 def _display_name(node: _CategoryNode) -> str:
     return node.name if node.full_name else "(root)"
-
-
-def _iterate_nodes(root: _CategoryNode) -> Iterable[_CategoryNode]:
-    for child in root.children:
-        yield from _walk(child)
 
 
 def _walk(node: _CategoryNode) -> Iterable[_CategoryNode]:
